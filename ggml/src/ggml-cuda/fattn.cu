@@ -1,6 +1,3 @@
-#include <cstdlib>
-#include <cstring>
-
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
@@ -8,10 +5,6 @@
 #include "fattn-vec.cuh"
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
-
-#ifdef GGML_USE_HIP
-#include "gfx906/gfx906-fattn-q8.cuh"
-#endif
 
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -280,9 +273,6 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_NONE     =   0,
     BEST_FATTN_KERNEL_TILE     = 200,
     BEST_FATTN_KERNEL_VEC      = 100,
-#ifdef GGML_USE_HIP
-    BEST_FATTN_KERNEL_TILE_Q8  = 250,
-#endif
     BEST_FATTN_KERNEL_WMMA_F16 = 300,
     BEST_FATTN_KERNEL_MMA_F16  = 400,
 };
@@ -307,9 +297,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // The effective batch size for the kernel can be increased by gqa_ratio.
     // The kernel versions without this optimization are also used for ALiBi, if there is no mask, or if the KV cache is not padded,
-    bool gqa_opt_applies = gqa_ratio % 2 == 0 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
     for (const ggml_tensor * t : {Q, K, V, mask}) {
-        if (t == nullptr) {
+        if (t == nullptr || ggml_is_quantized(t->type)) {
             continue;
         }
         for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
@@ -458,32 +448,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                     return BEST_FATTN_KERNEL_VEC;
                 }
             }
-        }
-#ifndef GGML_USE_HIP
-        else {
+        } else {
             if (Q->ne[1] <= 2) {
                 return BEST_FATTN_KERNEL_VEC;
             }
         }
-#endif
     }
-
-#ifdef GGML_USE_HIP
-    if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
-        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
-                                            (K->ne[0] != 40) &&
-                                            (K->ne[0] != 80) &&
-                                            (K->ne[0] != 112);
-
-        if (q8_head_size_supported) {
-            const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
-            if (env_use_dot4 == nullptr || strcmp(env_use_dot4, "0") != 0) {
-                return BEST_FATTN_KERNEL_TILE_Q8;
-            }
-        }
-    }
-#endif
-
     return BEST_FATTN_KERNEL_TILE;
 }
 
@@ -495,11 +465,6 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         case BEST_FATTN_KERNEL_TILE:
             ggml_cuda_flash_attn_ext_tile(ctx, dst);
             break;
-#ifdef GGML_USE_HIP
-        case BEST_FATTN_KERNEL_TILE_Q8:
-            ggml_cuda_flash_attn_ext_tile_q8(ctx, dst);
-            break;
-#endif
         case BEST_FATTN_KERNEL_VEC:
             ggml_cuda_flash_attn_ext_vec(ctx, dst);
             break;

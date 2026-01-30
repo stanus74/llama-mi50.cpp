@@ -276,8 +276,8 @@ static __device__ __forceinline__ void quantize_q8_1_to_shared(
     }
 #pragma unroll
     for (int mask = QI8_1/2; mask > 0; mask >>= 1) {
-        amax = fmaxf(amax, ggml_cuda_shfl_xor_sync<32>(amax, mask));
-        sum +=             ggml_cuda_shfl_xor_sync<32>(sum,  mask);
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, mask, 32));
+        sum +=             __shfl_xor_sync(0xFFFFFFFF, sum,  mask, 32);
     }
 
     const float d = amax / 127;
@@ -963,13 +963,6 @@ void launch_fattn(
                 efficiency_percent_best = efficiency_percent;
                 parallel_blocks = parallel_blocks_test;
             }
-        }
-
-        const bool is_amd = !GGML_CUDA_CC_IS_NVIDIA(cc);
-        const bool is_prompt_processing = Q->ne[1] > 1;
-
-        if (is_amd && is_prompt_processing) {
-            parallel_blocks = 1;
         }
 
         blocks_num.x = ntiles_x;
