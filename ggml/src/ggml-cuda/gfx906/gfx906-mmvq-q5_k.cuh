@@ -30,12 +30,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
     const int row = blockIdx.x * 2 + row_offset;
     if (row >= (int)nrows_x) return;
 
-#if defined(__gfx906__)
-    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-        printf("[gfx906] Q5_K MMVQ warp-coop active (ncols_x=%u)\n", ncols_x);
-    }
-#endif
-
     const uint32_t channel_dst = blockIdx.y;
     const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
     const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
