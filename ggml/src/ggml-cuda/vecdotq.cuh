@@ -860,11 +860,19 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
     const int * ql = (const int *)(bq5_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
     const int * qh = (const int *)(bq5_K->qh + 4 * ((iqs/2)%4));
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    vl[0] = gfx906_get_int_b4_fast(ql, 0);
+    vl[1] = gfx906_get_int_b4_fast(ql, 4);
+
+    vh[0] = gfx906_get_int_b4_fast(qh, 0) >> bq8_offset;
+    vh[1] = gfx906_get_int_b4_fast(qh, 4) >> bq8_offset;
+#else
     vl[0] = ql[0];
     vl[1] = ql[4];
 
     vh[0] = qh[0] >> bq8_offset;
     vh[1] = qh[4] >> bq8_offset;
+#endif
 
     const uint16_t * scales = (const uint16_t *)bq5_K->scales;
     uint16_t aux[2];
