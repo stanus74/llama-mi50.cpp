@@ -148,6 +148,11 @@ static constexpr __device__ int get_mmq_x_max_device() {
 
 static int get_mmq_y_host(const int cc) {
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
+#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
+#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
+#endif
+#endif
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
     return GGML_HIP_MMQ_Y;
 #else
     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
@@ -166,6 +171,9 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
 static constexpr __device__ int get_mmq_y_device() {
 #if defined(GGML_USE_HIP)
 #if defined(GGML_HIP_MMQ_Y)
+#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
+#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
+#endif
     return GGML_HIP_MMQ_Y;
 #elif defined(RDNA1)
     return 64;

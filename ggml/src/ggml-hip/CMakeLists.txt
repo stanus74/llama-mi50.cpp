@@ -43,6 +43,8 @@ find_package(hip     REQUIRED)
 find_package(hipblas REQUIRED)
 find_package(rocblas REQUIRED)
 
+set(GGML_HIP_MMQ_Y "" CACHE STRING "Override MMQ tile height for HIP (32/64/96/128)")
+
 if (${hip_VERSION} VERSION_LESS 6.1)
     message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
 endif()
