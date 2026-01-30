@@ -20,12 +20,6 @@ static __device__ __forceinline__ int gfx906_get_int_b2_fast(const void * x, con
     return x32;
 }
 
-static __device__ __forceinline__ int gfx906_get_int_b4_fast(const void * x, const int & i32) {
-    int x32;
-    memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
-    return x32;
-}
-
 __constant__ uint8_t gfx906_mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
 
 static __device__ __forceinline__ int2 gfx906_get_int_from_mxfp4_table(const uint32_t q4) {
