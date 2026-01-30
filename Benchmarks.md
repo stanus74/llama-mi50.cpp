@@ -69,3 +69,34 @@ pat@ubun24:/opt/llama-mi50.cpp$
 | qwen3moe 30B.A3B Q5_K - Medium |  20.24 GiB |    30.53 B | ROCm,ROCm  | 999 |     2048 |  1 |           tg128 |         76.46 ± 0.05 |
 
 
+---
+t@ubun24:/opt/llama.cpp$ ./bin/llama-bench -m /home/pat/models/Qwen3-8B-DeepSeek-v3.2-Speciale-Distill.q8_0.gguf -p 512,1024,2048 -n 128 -ngl 999 -fa 1 -b 2048 -ub 2048
+bash: ./bin/llama-bench: No such file or directory
+pat@ubun24:/opt/llama.cpp$ ./build/bin/llama-bench -m /home/pat/models/Qwen3-8B-DeepSeek-v3.2-Speciale-Distill.q8_0.gguf -p 512,1024,2048 -n 128 -ngl 999 -fa 1 -b 2048 -ub 2048
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          |       size |     params | backend    | ngl | n_ubatch | fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -------: | -: | --------------: | -------------------: |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm       | 999 |     2048 |  1 |           pp512 |        513.89 ± 0.32 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm       | 999 |     2048 |  1 |          pp1024 |        544.52 ± 0.42 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm       | 999 |     2048 |  1 |          pp2048 |        536.50 ± 0.83 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm       | 999 |     2048 |  1 |           tg128 |         59.53 ± 0.08 |
+
+build: c3b87cebf (7885)
+
+---
+pat@ubun24:/opt/llama-mi50.cpp$ ./build/bin/llama-bench -m /home/pat/models/Qwen3-8B-DeepSeek-v3.2-Speciale-Distill.q8_0.gguf -p 512,1024,2048 -n 128 -ngl 999 -fa 1 -b 2048 -ub 2048
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+load_backend: loaded ROCm backend from /opt/llama-mi50.cpp/build/bin/libggml-hip.so
+load_backend: loaded CPU backend from /opt/llama-mi50.cpp/build/bin/libggml-cpu.so
+| model                          |       size |     params | backend    | ngl | n_ubatch | fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -------: | -: | --------------: | -------------------: |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |           pp512 |        718.80 ± 0.57 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp1024 |        752.89 ± 0.38 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp2048 |        734.37 ± 2.26 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |           tg128 |         64.22 ± 0.03 |
+
+build: 4dcb6f81 (7893)
+
+---

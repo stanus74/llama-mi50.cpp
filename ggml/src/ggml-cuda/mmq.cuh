@@ -3573,6 +3573,12 @@ static __global__ void mul_mat_q(
     constexpr int nwarps = mmq_get_nwarps_device();
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+        printf("[gfx906] mul_mat_q active: type=%d mmq_x=%d mmq_y=%d\n", (int) type, mmq_x, get_mmq_y_device());
+    }
+#endif
+
     constexpr int qk    = ggml_cuda_type_traits<type>::qk;
     constexpr int mmq_y = get_mmq_y_device();
 
