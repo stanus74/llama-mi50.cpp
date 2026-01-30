@@ -129,6 +129,10 @@ if (GGML_HIP_GFX906 OR CMAKE_HIP_ARCHITECTURES MATCHES "gfx906")
     add_compile_definitions(GGML_HIP_GFX906)
 endif()
 
+if (GGML_HIP_MMQ_Y)
+    add_compile_definitions(GGML_HIP_MMQ_Y=${GGML_HIP_MMQ_Y})
+endif()
+
 if (GFX906_CU_FILES)
     string(REPLACE ";" ";" GFX906_CU_FILES_STR "${GFX906_CU_FILES}")
     message(STATUS "GFX906 .cu files found: ${GFX906_CU_FILES_STR}")
