@@ -99,9 +99,13 @@ if (CUDAToolkit_FOUND)
     message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} CMAKE_CUDA_ARCHITECTURES_NATIVE=${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
 
     file(GLOB   GGML_HEADERS_CUDA "*.cuh")
+    file(GLOB   SRCS "gfx906/*.cuh")
+    list(APPEND GGML_HEADERS_CUDA ${SRCS})
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    file(GLOB   SRCS "gfx906/*.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
