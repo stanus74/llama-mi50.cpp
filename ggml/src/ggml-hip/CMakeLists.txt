@@ -53,10 +53,17 @@ message(STATUS "HIP and hipBLAS found")
 set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} --gpu-max-threads-per-block=1024")
 
 file(GLOB   GGML_HEADERS_ROCM "../ggml-cuda/*.cuh")
+file(GLOB   SRCS "../ggml-cuda/gfx906/*.cuh")
+list(APPEND GGML_HEADERS_ROCM ${SRCS})
 list(APPEND GGML_HEADERS_ROCM "../../include/ggml-cuda.h")
 
 file(GLOB   GGML_SOURCES_ROCM "../ggml-cuda/*.cu")
+file(GLOB   SRCS "../ggml-cuda/gfx906/*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB   SRCS "../ggml-cuda/gfx906/template-instances/*.cu")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
+list(FILTER SRCS EXCLUDE REGEX ".*fattn-tile-q8.*")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
@@ -116,6 +123,10 @@ endif()
 
 if (NOT GGML_HIP_MMQ_MFMA)
     add_compile_definitions(GGML_HIP_NO_MMQ_MFMA)
+endif()
+
+if (GGML_HIP_GFX906 OR CMAKE_HIP_ARCHITECTURES MATCHES "gfx906")
+    add_compile_definitions(GGML_HIP_GFX906)
 endif()
 
 if (GGML_HIP_EXPORT_METRICS)
