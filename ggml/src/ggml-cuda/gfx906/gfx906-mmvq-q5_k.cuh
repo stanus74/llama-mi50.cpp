@@ -53,7 +53,7 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
         if (half_lane < lanes_per_block) {
             const int iqs = vdr_q5_k * half_lane;
             const int kby = ib * q8_blocks_per_q5;
-            partial = vec_dot_q5_K_q8_1(x + ib, y + kby, iqs);
+            partial = vec_dot_q5_K_q8_1(x, y + kby, ib, iqs);
         }
 
         partial = warp_reduce_sum<32>(partial);
