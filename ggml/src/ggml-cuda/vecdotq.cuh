@@ -4,6 +4,11 @@
 
 #include <cstdint>
 
+// GFX906 optimizations
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    #include "gfx906/gfx906-vecdotq.cuh"
+#endif
+
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
     const uint8_t * x8 = (const uint8_t *) x;
 
@@ -15,8 +20,10 @@ static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32
     return x32;
 }
 
+// GFX906: get_int_b1_fast is defined in gfx906/gfx906-vecdotq.cuh as gfx906_get_int_b1_fast
+
 static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32) {
-    const uint16_t * x16 = (const uint16_t *) x; // assume at least 2 byte alignment
+    const uint16_t * x16 = (const uint16_t *) x;
 
     int x32  = x16[2*i32 + 0] <<  0;
     x32     |= x16[2*i32 + 1] << 16;
@@ -24,45 +31,59 @@ static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32
     return x32;
 }
 
+// GFX906: get_int_b2_fast is defined in gfx906/gfx906-vecdotq.cuh as gfx906_get_int_b2_fast
+
 static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32) {
-    return ((const int *) x)[i32]; // assume at least 4 byte alignment
+    return ((const int *) x)[i32];
 }
 
-// q4 contains 8 indices with 4 bit each.
-// This function selects those bytes from table that are at those indices and returns them as int2.
-// The first int contains the bytes with even indices in q4, the second int contains the bytes with odd indices in q4.
+static __device__ __forceinline__ int2 get_int_from_mxfp4_table(const uint32_t q4) {
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Use optimized lookup from gfx906-vecdotq.cuh
+    return gfx906_get_int_from_mxfp4_table(q4);
+#else
+    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
+    const int8_t * q0_8   = (const int8_t *) &q0_32;
+    const char4    val0_8 = make_char4(
+        kvalues_mxfp4[q0_8[0]], kvalues_mxfp4[q0_8[1]], kvalues_mxfp4[q0_8[2]], kvalues_mxfp4[q0_8[3]]);
+
+    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
+    const int8_t * q1_8   = (const int8_t *) &q1_32;
+    const char4    val1_8 = make_char4(
+        kvalues_mxfp4[q1_8[0]], kvalues_mxfp4[q1_8[1]], kvalues_mxfp4[q1_8[2]], kvalues_mxfp4[q1_8[3]]);
+
+    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
+#endif
+}
+
 static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {
 #if defined(GGML_USE_HIP)
-    // Load the 16-byte table into four 32-bit unsigned integers.
     const uint32_t *values = (const uint32_t *)table;
 
     const uint32_t q_even = q4;
     const uint32_t q_odd  = (q4 >> 4);
 
-    // Perform lookups in the lower half of the table (indices 0-7).
-    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], q_even & 0x07070707);
-    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], q_odd & 0x07070707);
+    const uint32_t sel_even = q_even & 0x07070707;
+    const uint32_t sel_odd  = q_odd & 0x07070707;
 
-    // Perform lookups in the upper half of the table (indices 8-15).
-    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], q_even & 0x07070707);
-    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], q_odd & 0x07070707);
+    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], sel_even);
+    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], sel_odd);
+    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], sel_even);
+    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], sel_odd);
 
-    // Select between the low and high results based on the MSB of each index nibble.
-    uint32_t mask_even = 0x03020100 | ((q_even & 0x08080808) >> 1);
-    uint32_t res_x = __builtin_amdgcn_perm(v_even_high, v_even_low, mask_even);
-    uint32_t mask_odd = 0x03020100 | ((q_odd & 0x08080808) >> 1);
-    uint32_t res_y = __builtin_amdgcn_perm(v_odd_high, v_odd_low, mask_odd);
+    uint32_t b3e = (q_even >> 3) & 0x01010101;
+    uint32_t me = b3e; me |= me << 1; me |= me << 2; me |= me << 4;
+
+    uint32_t b3o = (q_odd >> 3) & 0x01010101;
+    uint32_t mo = b3o; mo |= mo << 1; mo |= mo << 2; mo |= mo << 4;
+
+    uint32_t res_x = (v_even_high & me) | (v_even_low & ~me);
+    uint32_t res_y = (v_odd_high & mo) | (v_odd_low & ~mo);
 
     return make_int2(res_x, res_y);
 #elif !defined(GGML_USE_MUSA)
-    // CUDA does not have an instruction for selecting bytes with 4 bit indices.
-    // However, __byte_perm is an instruction that selects bytes with 3 bit indices that can be used instead.
     const uint32_t * table32 = (const uint32_t *) table;
 
-    // __byte_perm selects bytes based on the lower 16 bits in its third argument.
-    // Therefore, do 2 iterations over the 32 bits in q4 with 0 and 16 shift.
-    // To handle the fourth bit, first call _byte_perm both for the low and the high 64 bit of table, using the low 3 bits.
-    // Then, call __byte_perm again to select from the low and high bytes based on the fourth bit.
     uint32_t tmp[2];
     const uint32_t low_high_selection_indices = (0x32103210 | ((q4 & 0x88888888) >> 1));
 #pragma unroll
@@ -74,9 +95,6 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
         tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
     }
 
-    // tmp contains the bytes from tyble in the same order as the 4 bit indices in q4.
-    // However, for the result we need ints with all even/odd 4 bit indices in q4.
-    // Therefore, 2 more calls to __byte_perm to put the bytes in the correct order.
     return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
 #else
     // Generic implementation.
@@ -297,17 +315,23 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 
     const block_mxfp4 * bq4 = (const block_mxfp4 *) vbq + kbx;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Use software pipelined version from gfx906-vecdotq.cuh
+    int sumi = 0;
+    GFX906_VEC_DOT_MXFP4_Q8_1(bq4, bq8_1, iqs, sumi);
+#else
     const int * q8 = (const int *) bq8_1->qs + iqs;
 
     int sumi = 0;
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+        const int2 v = get_int_from_mxfp4_table(aux_q4);
 
         sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
     }
+#endif
 
     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
     return d * sumi;
@@ -715,7 +739,11 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
 
 #pragma unroll
     for (int i = 0; i < VDR_Q8_0_Q8_1_MMVQ; ++i) {
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        v[i] = gfx906_get_int_b2_fast(bq8_0->qs, iqs + i);
+#else
         v[i] = get_int_b2(bq8_0->qs, iqs + i);
+#endif
         u[i] = get_int_b4(bq8_1->qs, iqs + i);
     }
 
