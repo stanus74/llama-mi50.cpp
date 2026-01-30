@@ -683,4 +683,21 @@ ggml_backend_reg_t ggml_backend_cpu_reg(void) {
     return &ggml_backend_cpu_reg;
 }
 
+static int ggml_backend_cpu_score_impl(void) {
+    return 100;
+}
+
 GGML_BACKEND_DL_IMPL(ggml_backend_cpu_reg)
+GGML_BACKEND_DL_SCORE_IMPL(ggml_backend_cpu_score_impl)
+
+#ifndef GGML_BACKEND_DL
+extern "C" {
+GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
+    return ggml_backend_cpu_reg();
+}
+
+GGML_BACKEND_API int ggml_backend_score(void) {
+    return ggml_backend_cpu_score_impl();
+}
+}
+#endif
