@@ -964,6 +964,10 @@ void ggml_cuda_flash_attn_ext_tile_q8_case(ggml_backend_cuda_context & ctx, ggml
 
 void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
+#ifdef DECL_FATTN_TILE_CASE
+#undef DECL_FATTN_TILE_CASE
+#endif
+
 #define DECL_FATTN_TILE_CASE(DKQ, DV)                             \
     template void ggml_cuda_flash_attn_ext_tile_q8_case              \
     <DKQ, DV>(ggml_backend_cuda_context & ctx, ggml_tensor * dst) \
