@@ -2245,19 +2245,11 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const block_q5_K * bxi = (const block_q5_K *) x + kbx0 + i*stride;
         const int ky = QR5_K*txi;
 
-        #if defined(GGML_USE_HIP) && defined(__gfx906__)
-        const int ql = gfx906_get_int_b4_fast(bxi->qs, txi);
-        #else
         const int ql = get_int_b4(bxi->qs, txi);
-        #endif
         const int ql0 = (ql >> 0) & 0x0F0F0F0F;
         const int ql1 = (ql >> 4) & 0x0F0F0F0F;
 
-        #if defined(GGML_USE_HIP) && defined(__gfx906__)
-        const int qh = gfx906_get_int_b4_fast(bxi->qh, txi % (QI5_K/4));
-        #else
         const int qh = get_int_b4(bxi->qh, txi % (QI5_K/4));
-        #endif
         const int qh0 = ((qh >> (2 * (txi / (QI5_K/4)) + 0)) << 4) & 0x10101010;
         const int qh1 = ((qh >> (2 * (txi / (QI5_K/4)) + 1)) << 4) & 0x10101010;
 
