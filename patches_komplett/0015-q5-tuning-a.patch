@@ -1,0 +1,45 @@
+From ad5046b5c3a93543ee946020968e1c6722da69b4 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 21:43:07 +0100
+Subject: [PATCH 15/16] q5 tuning-a
+
+---
+ ggml/src/ggml-cuda/mmq.cuh | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index ba293274..733d2478 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -147,8 +147,12 @@ static constexpr __device__ int get_mmq_x_max_device() {
+ }
+ 
+ static int get_mmq_y_host(const int cc) {
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
++    return GGML_HIP_MMQ_Y;
++#else
+     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
+         ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ? 128 : 64);
++#endif
+ }
+ 
+ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type) {
+@@ -161,11 +165,13 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
+ 
+ static constexpr __device__ int get_mmq_y_device() {
+ #if defined(GGML_USE_HIP)
+-#if defined(RDNA1)
++#if defined(GGML_HIP_MMQ_Y)
++    return GGML_HIP_MMQ_Y;
++#elif defined(RDNA1)
+     return 64;
+ #else
+     return 128;
+-#endif // defined RDNA1
++#endif // defined(GGML_HIP_MMQ_Y)
+ #else
+ #if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+     return 128;
+-- 
+2.52.0
+

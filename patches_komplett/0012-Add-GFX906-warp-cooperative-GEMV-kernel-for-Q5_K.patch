@@ -1,0 +1,27 @@
+From 60c309689254bddb589b65a5b9846c297324817f Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 21:14:01 +0100
+Subject: [PATCH 12/16] Add GFX906 warp-cooperative GEMV kernel for Q5_K
+ Dispatch Q5_K to gfx906 path for small matrices (ncols<=1024, ncols_dst==1,
+ no fusion) Keeps existing generic kernels as fallback
+
+---
+ ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+index e111c372..0feed709 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+@@ -53,7 +53,7 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
+         if (half_lane < lanes_per_block) {
+             const int iqs = vdr_q5_k * half_lane;
+             const int kby = ib * q8_blocks_per_q5;
+-            partial = vec_dot_q5_K_q8_1(x + ib, y + kby, iqs);
++            partial = vec_dot_q5_K_q8_1(x, y + kby, ib, iqs);
+         }
+ 
+         partial = warp_reduce_sum<32>(partial);
+-- 
+2.52.0
+

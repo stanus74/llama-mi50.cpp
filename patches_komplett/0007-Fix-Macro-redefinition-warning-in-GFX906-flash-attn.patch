@@ -1,0 +1,29 @@
+From 63716efce33a4dd099f692b9342939726c487346 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 20:20:47 +0100
+Subject: [PATCH 07/16] Fix: Macro redefinition warning in GFX906 flash-attn
+
+- Undefine DECL_FATTN_TILE_CASE before redefinition in gfx906-fattn-q8.cuh
+- Fixes -Wmacro-redefined warning during buil
+---
+ ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+index 6ea5f340..83dbaf4e 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+@@ -964,6 +964,10 @@ void ggml_cuda_flash_attn_ext_tile_q8_case(ggml_backend_cuda_context & ctx, ggml
+ 
+ void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
++#ifdef DECL_FATTN_TILE_CASE
++#undef DECL_FATTN_TILE_CASE
++#endif
++
+ #define DECL_FATTN_TILE_CASE(DKQ, DV)                             \
+     template void ggml_cuda_flash_attn_ext_tile_q8_case              \
+     <DKQ, DV>(ggml_backend_cuda_context & ctx, ggml_tensor * dst) \
+-- 
+2.52.0
+

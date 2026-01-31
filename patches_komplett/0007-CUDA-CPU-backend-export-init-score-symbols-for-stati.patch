@@ -1,0 +1,39 @@
+From 860407ed7ecfa3a15dfb7c09710ca21a80dd6d61 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 09:56:11 +0100
+Subject: [PATCH 7/7] CUDA/CPU backend: export init/score symbols for static
+ builds
+
+---
+ ggml/src/ggml-cuda/ggml-cuda.cu | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 4ff8d6d7..0eb121ec 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5118,4 +5118,21 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
+     return cuda_backend;
+ }
+ 
++static int ggml_backend_cuda_score_impl(void) {
++    return ggml_backend_cuda_get_device_count() > 0 ? 100 : 0;
++}
++
+ GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
++GGML_BACKEND_DL_SCORE_IMPL(ggml_backend_cuda_score_impl)
++
++#ifndef GGML_BACKEND_DL
++extern "C" {
++GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
++    return ggml_backend_cuda_reg();
++}
++
++GGML_BACKEND_API int ggml_backend_score(void) {
++    return ggml_backend_cuda_score_impl();
++}
++}
++#endif
+-- 
+2.52.0
+

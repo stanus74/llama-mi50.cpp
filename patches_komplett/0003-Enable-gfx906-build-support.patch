@@ -1,0 +1,33 @@
+From 08913c5dc70797cfc54cb4dfae78393432942c82 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 13:21:29 +0100
+Subject: [PATCH 03/16] Enable gfx906 build support:
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+add HIP-specific Wave64 MoE fallback and RDNA MMQ heuristics (category E)
+ensure Blackwell-capable builds always request both 120a-real and 121a-real targets (category G)
+---
+ ggml/src/ggml-cuda/CMakeLists.txt | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
+index 3e413784..ed25dbd2 100644
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -47,10 +47,7 @@ if (CUDAToolkit_FOUND)
+                 #     check Modules/Internal/CMakeCUDAArchitecturesValidate.cmake in the CMake git repository instead.
+                 # However, the architectures 120a-real and 121a-real should work with basically any CMake version and
+                 #     until the release of e.g. Rubin there is no benefit to shipping virtual architectures for Blackwell.
+-                list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real)
+-            endif()
+-            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
+-                list(APPEND CMAKE_CUDA_ARCHITECTURES 121a-real)
++                list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real 121a-real)
+             endif()
+         endif()
+     endif()
+-- 
+2.52.0
+
