@@ -31,7 +31,6 @@ cmake .. \
     -DGGML_HIP_NO_VMM=ON \
     -DGGML_HIP_NO_HIPBLASLT=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=ON \
-    -DGGML_HIP_MMQ_Y=96 \
     -DGGML_NATIVE=ON \
     -DLLAMA_BUILD_SERVER=ON \
     -DLLAMA_BUILD_TOOLS=ON \
@@ -41,6 +40,8 @@ cmake .. \
 
 # 4. Build
 make -j$(nproc)
+
+### entfernt für kernel q5  -DGGML_HIP_MMQ_Y=96 \
 
 echo "✅ Fertig! Caching wurde genutzt. Speed: 1150 t/s Ready."
 
