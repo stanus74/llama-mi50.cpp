@@ -1,0 +1,111 @@
+From 4721421ec339114e3f7d55915fbcb28219e8f41d Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 21:34:04 +0100
+Subject: [PATCH 14/16] up
+
+---
+ ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh  | 2 +-
+ ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh | 6 ------
+ ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh   | 6 ------
+ ggml/src/ggml-cuda/mmq.cuh                     | 8 --------
+ ggml/src/ggml-cuda/vecdotq.cuh                 | 8 --------
+ 5 files changed, 1 insertion(+), 29 deletions(-)
+
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+index 83dbaf4e..87ea3d3a 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+@@ -54,7 +54,7 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_q8_get_config
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112, 64, 256, 2,  32,  56)
+ 
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  2, 256, 2, 128,  64)
+-    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  4, 128, 2,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  4, 128, 1,  64, 128)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  8, 256, 2,  64, 128)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128, 16, 256, 2,  64, 128)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128, 32, 256, 2,  64,  64)
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+index af4ec2a6..0feed709 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+@@ -30,12 +30,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
+     const int row = blockIdx.x * 2 + row_offset;
+     if (row >= (int)nrows_x) return;
+ 
+-#if defined(__gfx906__)
+-    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+-        printf("[gfx906] Q5_K MMVQ warp-coop active (ncols_x=%u)\n", ncols_x);
+-    }
+-#endif
+-
+     const uint32_t channel_dst = blockIdx.y;
+     const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
+     const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+index 562d6699..92f37bde 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+@@ -20,12 +20,6 @@ static __device__ __forceinline__ int gfx906_get_int_b2_fast(const void * x, con
+     return x32;
+ }
+ 
+-static __device__ __forceinline__ int gfx906_get_int_b4_fast(const void * x, const int & i32) {
+-    int x32;
+-    memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
+-    return x32;
+-}
+-
+ __constant__ uint8_t gfx906_mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
+ 
+ static __device__ __forceinline__ int2 gfx906_get_int_from_mxfp4_table(const uint32_t q4) {
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index 6fc0b413..ba293274 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -2245,19 +2245,11 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+         const block_q5_K * bxi = (const block_q5_K *) x + kbx0 + i*stride;
+         const int ky = QR5_K*txi;
+ 
+-        #if defined(GGML_USE_HIP) && defined(__gfx906__)
+-        const int ql = gfx906_get_int_b4_fast(bxi->qs, txi);
+-        #else
+         const int ql = get_int_b4(bxi->qs, txi);
+-        #endif
+         const int ql0 = (ql >> 0) & 0x0F0F0F0F;
+         const int ql1 = (ql >> 4) & 0x0F0F0F0F;
+ 
+-        #if defined(GGML_USE_HIP) && defined(__gfx906__)
+-        const int qh = gfx906_get_int_b4_fast(bxi->qh, txi % (QI5_K/4));
+-        #else
+         const int qh = get_int_b4(bxi->qh, txi % (QI5_K/4));
+-        #endif
+         const int qh0 = ((qh >> (2 * (txi / (QI5_K/4)) + 0)) << 4) & 0x10101010;
+         const int qh1 = ((qh >> (2 * (txi / (QI5_K/4)) + 1)) << 4) & 0x10101010;
+ 
+diff --git a/ggml/src/ggml-cuda/vecdotq.cuh b/ggml/src/ggml-cuda/vecdotq.cuh
+index 416aa3b9..808419ff 100644
+--- a/ggml/src/ggml-cuda/vecdotq.cuh
++++ b/ggml/src/ggml-cuda/vecdotq.cuh
+@@ -860,19 +860,11 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+     const int * ql = (const int *)(bq5_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
+     const int * qh = (const int *)(bq5_K->qh + 4 * ((iqs/2)%4));
+ 
+-#if defined(GGML_USE_HIP) && defined(__gfx906__)
+-    vl[0] = gfx906_get_int_b4_fast(ql, 0);
+-    vl[1] = gfx906_get_int_b4_fast(ql, 4);
+-
+-    vh[0] = gfx906_get_int_b4_fast(qh, 0) >> bq8_offset;
+-    vh[1] = gfx906_get_int_b4_fast(qh, 4) >> bq8_offset;
+-#else
+     vl[0] = ql[0];
+     vl[1] = ql[4];
+ 
+     vh[0] = qh[0] >> bq8_offset;
+     vh[1] = qh[4] >> bq8_offset;
+-#endif
+ 
+     const uint16_t * scales = (const uint16_t *)bq5_K->scales;
+     uint16_t aux[2];
+-- 
+2.52.0
+
