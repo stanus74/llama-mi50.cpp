@@ -9,10 +9,24 @@
 
 using namespace ggml_cuda_mma;
 
+// GFX906 MMQ optimizations (vectorized loads and prefetch)
+#ifdef GGML_USE_HIP
+    #include "gfx906/gfx906-mmq.cuh"
+    #include "gfx906/gfx906-config.h"
+    #include "gfx906/gfx906-mmq-prefetch.cuh"
+#endif
+
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
-#define MMQ_ITER_K 256
-#define MMQ_ITER_K_MXFP4_FP4    512
-#define MMQ_NWARPS 8
+
+// GFX906-optimized MMQ configuration
+#ifdef GGML_USE_HIP
+    #define MMQ_ITER_K GFX906_MMQ_ITER_K
+    #define MMQ_NWARPS GFX906_MMQ_NWARPS
+#else
+    #define MMQ_ITER_K 256
+    #define MMQ_NWARPS 8
+#endif
+#define MMQ_ITER_K_MXFP4_FP4 512
 
 typedef void (*load_tiles_mmq_t)(const char * __restrict__ x, int * x_tile, const int kbx0, const int i_max, const int stride);
 typedef void (*vec_dot_mmq_t)(const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
@@ -133,8 +147,17 @@ static constexpr __device__ int get_mmq_x_max_device() {
 }
 
 static int get_mmq_y_host(const int cc) {
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
+#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
+#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
+#endif
+#endif
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
+    return GGML_HIP_MMQ_Y;
+#else
     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
         ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ? 128 : 64);
+#endif
 }
 
 static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type) {
@@ -147,11 +170,16 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
 
 static constexpr __device__ int get_mmq_y_device() {
 #if defined(GGML_USE_HIP)
-#if defined(RDNA1)
+#if defined(GGML_HIP_MMQ_Y)
+#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
+#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
+#endif
+    return GGML_HIP_MMQ_Y;
+#elif defined(RDNA1)
     return 64;
 #else
     return 128;
-#endif // defined RDNA1
+#endif // defined(GGML_HIP_MMQ_Y)
 #else
 #if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
     return 128;
@@ -250,6 +278,15 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
 // block_q8_1_mmq has (128 8-bit ints == 32 32-bit ints + 4 32-bit scales)
 #define MMQ_TILE_Y_K     (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)
 #define MMQ_TILE_Y_FP4_K MMQ_TILE_Y_K
+
+// LDS stride for Y-tile - PADDING ANALYSIS RESULTS:
+// Original stride 40: 40 mod 32 = 8 → 4-way bank conflicts (9.3% LDS stalls)
+// Tested: Padded stride 41 with dst_idx = l + l/40 mapping
+// Result: -3.5% slower (1180 vs 1223 t/s) even with proper shared mem allocation
+// Root cause: Division overhead in store loop outweighs bank conflict reduction
+// The bank conflicts occur during vec_dot reads, but the overhead is in stores
+// Conclusion: Keep original stride - bank conflicts are cheaper than index math
+#define MMQ_TILE_Y_K_LDS MMQ_TILE_Y_K
 
 static int mmq_get_granularity_host(const int mmq_x, const int cc) {
     if (amd_mfma_available(cc) || amd_wmma_available(cc)) {
@@ -384,15 +421,20 @@ static __device__ __forceinline__ void vec_dot_q4_0_q8_1_dp4a(
 
                 int u[2*VDR_Q4_0_Q8_1_MMQ];
 
+#if defined(GGML_USE_HIP)
+                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
+                gfx906_load_q4_0_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_0, u);
+#else
 #pragma unroll
                 for (int l = 0; l < VDR_Q4_0_Q8_1_MMQ; ++l) {
-                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
-                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_0)];
+                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
+                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_0)];
                 }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_0_q8_1_impl<VDR_Q4_0_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_0], u,
-                     x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + k0/(QR4_0*QI4_0)], y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
+                     x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + k0/(QR4_0*QI4_0)], y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
             }
         }
     }
@@ -487,15 +529,20 @@ static __device__ __forceinline__ void vec_dot_q4_1_q8_1_dp4a(
 
                 int u[2*VDR_Q4_1_Q8_1_MMQ];
 
+#if defined(GGML_USE_HIP)
+                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
+                gfx906_load_q4_1_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_1, u);
+#else
 #pragma unroll
                 for (int l = 0; l < VDR_Q4_1_Q8_1_MMQ; ++l) {
-                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
-                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_1)];
+                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
+                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_1)];
                 }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_1_q8_1_impl<VDR_Q4_1_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_1], u,
-                     x_dm[i*(MMQ_TILE_NE_K/QI4_1) + i/QI4_1 + k0/(QR4_1*QI4_1)], y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
+                     x_dm[i*(MMQ_TILE_NE_K/QI4_1) + i/QI4_1 + k0/(QR4_1*QI4_1)], y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
             }
         }
     }
@@ -676,24 +723,46 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI8_0;
     const int kqsx = txi % QI8_0;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Software pipelining using macros from gfx906-mmq.cuh
+    constexpr int loop_iters = mmq_y / (nrows * nwarps);
+    constexpr int cache_size = loop_iters > 16 ? 16 : loop_iters;
+    int qs0_cache[cache_size];
+    int qs1_cache[cache_size];
+    int i_slot_cache[cache_size];
+
+    // Load all data into registers (async)
+    GFX906_LOAD_TILES_Q8_0_ASYNC(cache_size, nrows, nwarps, threads_per_row, need_check,
+        x, kbx0, stride, i_max, txi, kbx, kqsx, qs0_cache, qs1_cache, i_slot_cache);
+
+    // Store all to LDS
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    GFX906_STORE_TILES_Q8_0_LDS_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+#else
+    GFX906_STORE_TILES_Q8_0_LDS_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+#endif
+#else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        // GFX906 optimization: Avoid LDS write conflicts in need_check path.
+        // Original code clamped i to i_max, causing all out-of-bounds threads to
+        // write to the SAME location (tile[i_max*...]) - serializing LDS writes.
+        // Fix: Each thread writes to its ORIGINAL slot; out-of-bounds write zeros.
+        const int i_slot = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
+        const bool oob = need_check && (i_slot > i_max);
 
-        if (need_check) {
-            i = min(i, i_max);
-        }
-
-        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbx;
+        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbx;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #else
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
+#endif
 
     constexpr int blocks_per_tile_x_row = 2*MMQ_TILE_NE_K / QI8_0;
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
@@ -701,18 +770,17 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nwarps * rows_per_warp) {
-        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+        // Same optimization for scale loading
+        const int i_slot = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
+        const bool oob = need_check && (i_slot > i_max);
 
-        if (need_check) {
-            i = min(i, i_max);
-        }
-
-        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbxd;
+        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbxd;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q8_0                 + kbxd] = bxi->d;
+        x_df[i_slot*MMQ_MMA_TILE_X_K_Q8_0                 + kbxd] = oob ? 0.0f : (float)bxi->d;
 #else
-        x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + kbxd] = bxi->d;
+        x_df[i_slot*(2*MMQ_TILE_NE_K/QI8_0) + i_slot/(QI8_0/2) + kbxd] = oob ? 0.0f : (float)bxi->d;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
@@ -737,6 +805,41 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI_MXFP4;
     const int kqsx = txi % QI_MXFP4;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Software pipelining - load all data first, then dequant all
+    // Maximizes memory-level parallelism before compute
+    constexpr int loop_iters = mmq_y / (nrows * nwarps);
+    int aux_q4_cache[loop_iters > 16 ? 16 : loop_iters];
+    int i_cache[loop_iters > 16 ? 16 : loop_iters];
+
+    // Phase 1: Issue all loads
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int i0 = iter * nrows * nwarps;
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (need_check) {
+            i = min(i, i_max);
+        }
+        const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
+        aux_q4_cache[iter] = get_int_b1(bxi->qs, kqsx);
+        i_cache[iter] = i;
+    }
+
+    // Phase 2: Dequant and store
+    const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int2 v = get_int_from_mxfp4_table(aux_q4_cache[iter]);
+        const int i = i_cache[iter];
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0]        = v.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + QI_MXFP4] = v.y;
+#else
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0]        = v.x;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
+#endif
+    }
+#else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
@@ -748,7 +851,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
 
         const int aux_q4 = get_int_b1(bxi->qs, kqsx);
-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+        const int2 v = get_int_from_mxfp4_table(aux_q4);
         const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
@@ -759,6 +862,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)  || defined(AMD_WMMA_AVAILABLE)
     }
+#endif
 
     constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI_MXFP4;
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
@@ -851,8 +955,8 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_dp4a(
                 const int i = i0 + threadIdx.x;
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q8_0_q8_1_impl<float, VDR_Q8_0_Q8_1_MMQ>
-                    (&x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k0 % MMQ_TILE_NE_K],
-                     x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + k0/QI8_0], y_df[j*MMQ_TILE_Y_K + (k0/QI8_1) % (MMQ_TILE_NE_K/QI8_1)]);
+                    (&x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k0 % MMQ_TILE_NE_K],
+                     x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + k0/QI8_0], y_df[j*MMQ_TILE_Y_K_LDS + (k0/QI8_1) % (MMQ_TILE_NE_K/QI8_1)]);
             }
         }
     }
@@ -2118,8 +2222,8 @@ static __device__ __forceinline__ void vec_dot_q4_K_q8_1_dp4a(
                 const uint8_t * sc = (const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/32] + 2*(k01/16);
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_K_q8_1_impl_mmq(
-                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
+                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
+                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
             }
         }
     }
@@ -2275,8 +2379,8 @@ static __device__ __forceinline__ void vec_dot_q5_K_q8_1_dp4a(
                 const uint8_t * sc = ((const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k00/32]) + 2*(k01/16);
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q5_K_q8_1_impl_mmq(
-                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
+                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
+                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
             }
         }
     }
@@ -2396,8 +2500,8 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_dp4a(
                 const int8_t * sc = ((const int8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/16]);
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q6_K_q8_1_impl_mmq(
-                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc,
-                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K + k01/QI8_1]);
+                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc,
+                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
             }
         }
     }
@@ -2439,10 +2543,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
 #pragma unroll
         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
             tile_B B[1];
-            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
+            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
 
             const int j = j0 + tile_C::get_j(0);
-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1] / 2;
+            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1] / 2;
 
 #pragma unroll
             for (int n = 0; n < ntx; ++n) {
@@ -2468,7 +2572,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
 
     const int   * x_qs = (const int   *) x;
     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
@@ -2490,10 +2594,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
 #pragma unroll
         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
             tile_B B;
-            load_generic(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
+            load_generic(B, y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
 
             const int j = j0 + tile_C::get_j(0);
-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
+            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1];
 
 #pragma unroll
             for (int n = 0; n < ntx; ++n) {
@@ -2519,7 +2623,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
     constexpr int rows_per_warp = 2 * granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
 
     const int   * x_qs = (const int   *) x;
     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
@@ -3375,7 +3479,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
     extern __shared__ int data_mul_mat_q[];
     int * tile_y = data_mul_mat_q + mmq_x;
-    int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
+    int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K_LDS, nwarps*warp_size);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     constexpr vec_dot_mmq_t    vec_dot    = mmq_type_traits<mmq_x, mmq_y, need_check, type>::vec_dot_mma;
@@ -3404,14 +3508,21 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         {
             const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
 #pragma unroll
-            for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-
+            for (int l0 = 0; l0 < mmq_x*MMQ_TILE_Y_K_LDS; l0 += nwarps*warp_size) {
+                const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
                 tile_y[l] = by0[l];
             }
         }
 
         __syncthreads();
+
+// GFX906 PREFETCH: Issue AFTER barrier1, BEFORE vec_dot1
+// Maximum overlap: vec_dot1 + barrier2 + Y_tile2_load + barrier3 + vec_dot2 + barrier4 + X_tile_loads
+// Data used at Y_tile1_load in next iteration (~600+ instructions of overlap)
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        int prefetch_keep_alive = gfx906_prefetch_y_tile_v4<mmq_x, MMQ_TILE_Y_K, nwarps, warp_size>(
+            y, ncols_y, kb0, kb0_stop, qk, blocks_per_iter);
+#endif
 
         vec_dot(tile_x, tile_y, sum, 0);
 
@@ -3420,9 +3531,8 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         {
             const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
 #pragma unroll
-            for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-
+            for (int l0 = 0; l0 < mmq_x*MMQ_TILE_Y_K_LDS; l0 += nwarps*warp_size) {
+                const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
                 tile_y[l] = by0[l];
             }
         }
@@ -3430,6 +3540,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         __syncthreads();
 
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        gfx906_prefetch_consume(prefetch_keep_alive);
+#endif
 
         __syncthreads();
     }

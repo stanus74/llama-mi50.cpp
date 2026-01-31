@@ -43,6 +43,8 @@ find_package(hip     REQUIRED)
 find_package(hipblas REQUIRED)
 find_package(rocblas REQUIRED)
 
+set(GGML_HIP_MMQ_Y "" CACHE STRING "Override MMQ tile height for HIP (32/64/96/128)")
+
 if (${hip_VERSION} VERSION_LESS 6.1)
     message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
 endif()
@@ -58,10 +60,10 @@ list(APPEND GGML_HEADERS_ROCM ${SRCS})
 list(APPEND GGML_HEADERS_ROCM "../../include/ggml-cuda.h")
 
 file(GLOB   GGML_SOURCES_ROCM "../ggml-cuda/*.cu")
-file(GLOB   SRCS "../ggml-cuda/gfx906/*.cu")
-list(APPEND GGML_SOURCES_ROCM ${SRCS})
-file(GLOB   SRCS "../ggml-cuda/gfx906/template-instances/*.cu")
-list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB   GFX906_CU_FILES "../ggml-cuda/gfx906/*.cu")
+list(APPEND GGML_SOURCES_ROCM ${GFX906_CU_FILES})
+file(GLOB   GFX906_TEMPLATE_FILES "../ggml-cuda/gfx906/template-instances/*.cu")
+list(APPEND GGML_SOURCES_ROCM ${GFX906_TEMPLATE_FILES})
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
 list(FILTER SRCS EXCLUDE REGEX ".*fattn-tile-q8.*")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
@@ -127,6 +129,24 @@ endif()
 
 if (GGML_HIP_GFX906 OR CMAKE_HIP_ARCHITECTURES MATCHES "gfx906")
     add_compile_definitions(GGML_HIP_GFX906)
+endif()
+
+if (GGML_HIP_MMQ_Y)
+    add_compile_definitions(GGML_HIP_MMQ_Y=${GGML_HIP_MMQ_Y})
+endif()
+
+if (GFX906_CU_FILES)
+    string(REPLACE ";" ";" GFX906_CU_FILES_STR "${GFX906_CU_FILES}")
+    message(STATUS "GFX906 .cu files found: ${GFX906_CU_FILES_STR}")
+endif()
+
+if (GFX906_TEMPLATE_FILES)
+    string(REPLACE ";" ";" GFX906_TEMPLATE_FILES_STR "${GFX906_TEMPLATE_FILES}")
+    message(STATUS "GFX906 template instances found: ${GFX906_TEMPLATE_FILES_STR}")
+endif()
+
+if (GGML_HIP_GFX906 OR CMAKE_HIP_ARCHITECTURES MATCHES "gfx906")
+    message(STATUS "GFX906 optimizations enabled (warp-cooperative Q4/Q5/Q8 MMVQ)")
 endif()
 
 if (GGML_HIP_EXPORT_METRICS)
