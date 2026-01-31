@@ -4,7 +4,7 @@
 
 Bevor du eine Aufgabe bearbeitest, **musst du den Projekthintergrund verstehen**:
 
-### 1️⃣ Lies `/plans/Optimierung.md`
+### 1️⃣ Lies `plans/Optimierung.md`
 
 Diese Datei enthält:
 - **Ziel des Projekts:** gfx906 (AMD MI50/MI60) Optimierungen für llama.cpp
@@ -16,7 +16,7 @@ Diese Datei enthält:
 
 ---
 
-### 2️⃣ Lies `/plans/Diffs-gfx906-mainline.md`
+### 2️⃣ Lies `plans/Diffs-gfx906-mainline.md`
 
 Diese Datei dokumentiert:
 - **Alle Unterschiede** zwischen gfx906-Fork und Mainline (llama.cpp b7871)
@@ -48,9 +48,9 @@ Diese Datei dokumentiert:
 
 ### Schritt 1: Kontext lesen (5 min)
 ```
-1. Öffne /plans/Optimierung.md
+1. Öffne plans/Optimierung.md
 2. Verstehe: Was ist das Problem? Was ist die Lösung?
-3. Öffne /plans/Diffs-gfx906-mainline.md
+3. Öffne plans/Diffs-gfx906-mainline.md
 4. Verstehe: Welche Kategorien sind relevant für DEINE Aufgabe?
 ```
 
@@ -102,7 +102,7 @@ Diese Datei dokumentiert:
 
 ### Szenario A: "Patch Kategorie X anwenden"
 
-1. Schau `/plans/Diffs-gfx906-mainline.md` → Kategorie X
+1. Schau `plans/Diffs-gfx906-mainline.md` → Kategorie X
 2. Lies welche Dateien betroffen sind
 3. Generiere Patch: `git diff ... > patch.diff`
 4. Wende an: `git apply patch.diff`
@@ -114,9 +114,9 @@ Diese Datei dokumentiert:
 
 ### Szenario B: "Integration von Fork X vs Mainline Y"
 
-1. Lies `/plans/Optimierung.md` für Hintergrund
+1. Lies `plans/Optimierung.md` für Hintergrund
 2. Vergleiche: `diff -r fork/ggml mainline/ggml`
-3. Kategorisiere Unterschiede (nutze `/plans/Diffs-gfx906-mainline.md`)
+3. Kategorisiere Unterschiede (nutze `plans/Diffs-gfx906-mainline.md`)
 4. Extrahiere Patches pro Kategorie
 5. Wende nacheinander an mit Tests dazwischen
 6. Dokumentiere Performance-Ergebnisse
@@ -126,7 +126,7 @@ Diese Datei dokumentiert:
 ### Szenario C: "Fehler bei Build/Integration"
 
 1. Lese Fehlermeldung genau
-2. Schau `/plans/Diffs-gfx906-mainline.md` ob ähnliche Probleme dokumentiert sind
+2. Schau `plans/Diffs-gfx906-mainline.md` ob ähnliche Probleme dokumentiert sind
 3. Prüfe ob Struktur-Namen sich geändert haben (sehr häufig!)
 4. Manuelles Mergen in VS Code
 5. Build + Test erneut
@@ -155,7 +155,7 @@ Diese Datei dokumentiert:
 ├── build/                          ← Build-Artefakte
 └── .git/                           ← Git-History
 
-/home/pat/Downloads/patch/          ← Patch-Dateien
+plans/patch          ← Patch-Dateien
 ├── C-flash-attn-gfx906.patch
 ├── F-dpp-warp-utils.patch
 └── ... (weitere Patches)
@@ -169,8 +169,8 @@ Diese Datei dokumentiert:
 
 ```bash
 # 1. CONTEXT VERSTEHEN
-cat /plans/Optimierung.md
-cat /plans/Diffs-gfx906-mainline.md | grep -A 50 "Kategorie C"
+cat plans/Optimierung.md
+cat plans/Diffs-gfx906-mainline.md | grep -A 50 "Kategorie C"
 
 # 2. PATCH EXTRAHIEREN
 diff -u /tmp/llama-mainline/ggml/src/ggml-cuda/fattn.cu \
@@ -247,8 +247,8 @@ git commit -m "Add: Flash-Attention gfx906 optimizations (Category C)
 
 ## 🚀 SCHNELL-CHECKLISTE VOR JEDER AUFGABE
 
-- [ ] Ich habe `/plans/Optimierung.md` gelesen
-- [ ] Ich habe `/plans/Diffs-gfx906-mainline.md` für relevante Kategorie gelesen
+- [ ] Ich habe `plans/Optimierung.md` gelesen
+- [ ] Ich habe `plans/Diffs-gfx906-mainline.md` für relevante Kategorie gelesen
 - [ ] Ich verstehe welche Dateien geändert werden
 - [ ] Ich erstelle einen neuen Branch (nicht in master arbeiten)
 - [ ] Ich teste nach jedem Patch (Build + Benchmark)
@@ -260,8 +260,8 @@ git commit -m "Add: Flash-Attention gfx906 optimizations (Category C)
 ## 🎯 ZUSAMMENFASSUNG
 
 **Vor jeder Aufgabe:**
-1. 📖 Lese `/plans/Optimierung.md` — verstehe das Projekt
-2. 📖 Lese `/plans/Diffs-gfx906-mainline.md` — verstehe die Änderungen
+1. 📖 Lese `plans/Optimierung.md` — verstehe das Projekt
+2. 📖 Lese `plans/Diffs-gfx906-mainline.md` — verstehe die Änderungen
 3. 🔧 Identifiziere betroffene Dateien & Kategorien
 4. 🧪 Teste nach jedem Patch
 5. 📊 Dokumentiere Performance-Ergebnisse
