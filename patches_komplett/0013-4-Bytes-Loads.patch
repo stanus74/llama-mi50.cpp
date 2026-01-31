@@ -1,0 +1,97 @@
+From fca140f258d606241cec8f6188aa785086eecda3 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 21:29:09 +0100
+Subject: [PATCH 13/16] 4 Bytes Loads
+
+---
+ ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh | 6 ++++++
+ ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh   | 6 ++++++
+ ggml/src/ggml-cuda/mmq.cuh                     | 8 ++++++++
+ ggml/src/ggml-cuda/vecdotq.cuh                 | 8 ++++++++
+ 4 files changed, 28 insertions(+)
+
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+index 0feed709..af4ec2a6 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+@@ -30,6 +30,12 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
+     const int row = blockIdx.x * 2 + row_offset;
+     if (row >= (int)nrows_x) return;
+ 
++#if defined(__gfx906__)
++    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
++        printf("[gfx906] Q5_K MMVQ warp-coop active (ncols_x=%u)\n", ncols_x);
++    }
++#endif
++
+     const uint32_t channel_dst = blockIdx.y;
+     const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
+     const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+index 92f37bde..562d6699 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+@@ -20,6 +20,12 @@ static __device__ __forceinline__ int gfx906_get_int_b2_fast(const void * x, con
+     return x32;
+ }
+ 
++static __device__ __forceinline__ int gfx906_get_int_b4_fast(const void * x, const int & i32) {
++    int x32;
++    memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
++    return x32;
++}
++
+ __constant__ uint8_t gfx906_mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
+ 
+ static __device__ __forceinline__ int2 gfx906_get_int_from_mxfp4_table(const uint32_t q4) {
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index ba293274..6fc0b413 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -2245,11 +2245,19 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+         const block_q5_K * bxi = (const block_q5_K *) x + kbx0 + i*stride;
+         const int ky = QR5_K*txi;
+ 
++        #if defined(GGML_USE_HIP) && defined(__gfx906__)
++        const int ql = gfx906_get_int_b4_fast(bxi->qs, txi);
++        #else
+         const int ql = get_int_b4(bxi->qs, txi);
++        #endif
+         const int ql0 = (ql >> 0) & 0x0F0F0F0F;
+         const int ql1 = (ql >> 4) & 0x0F0F0F0F;
+ 
++        #if defined(GGML_USE_HIP) && defined(__gfx906__)
++        const int qh = gfx906_get_int_b4_fast(bxi->qh, txi % (QI5_K/4));
++        #else
+         const int qh = get_int_b4(bxi->qh, txi % (QI5_K/4));
++        #endif
+         const int qh0 = ((qh >> (2 * (txi / (QI5_K/4)) + 0)) << 4) & 0x10101010;
+         const int qh1 = ((qh >> (2 * (txi / (QI5_K/4)) + 1)) << 4) & 0x10101010;
+ 
+diff --git a/ggml/src/ggml-cuda/vecdotq.cuh b/ggml/src/ggml-cuda/vecdotq.cuh
+index 808419ff..416aa3b9 100644
+--- a/ggml/src/ggml-cuda/vecdotq.cuh
++++ b/ggml/src/ggml-cuda/vecdotq.cuh
+@@ -860,11 +860,19 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+     const int * ql = (const int *)(bq5_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
+     const int * qh = (const int *)(bq5_K->qh + 4 * ((iqs/2)%4));
+ 
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    vl[0] = gfx906_get_int_b4_fast(ql, 0);
++    vl[1] = gfx906_get_int_b4_fast(ql, 4);
++
++    vh[0] = gfx906_get_int_b4_fast(qh, 0) >> bq8_offset;
++    vh[1] = gfx906_get_int_b4_fast(qh, 4) >> bq8_offset;
++#else
+     vl[0] = ql[0];
+     vl[1] = ql[4];
+ 
+     vh[0] = qh[0] >> bq8_offset;
+     vh[1] = qh[4] >> bq8_offset;
++#endif
+ 
+     const uint16_t * scales = (const uint16_t *)bq5_K->scales;
+     uint16_t aux[2];
+-- 
+2.52.0
+

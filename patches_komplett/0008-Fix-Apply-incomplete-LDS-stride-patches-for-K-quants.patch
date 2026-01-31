@@ -1,0 +1,98 @@
+From 4dcb6f812002ba122f0f16aa5b6e78c299cd928a Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 20:25:40 +0100
+Subject: [PATCH 08/16] Fix: Apply incomplete LDS stride patches for K-quants
+ (Category D)
+
+- Update vec_dot_q4_K, q5_K, q6_K implementations in mmq.cuh to use MMQ_TILE_Y_K_LDS
+- Ensures consistent LDS addressing across all quantization types
+- Completes the integration of D-q8-mxfp4-pipeline.patch logic
+- Note: Q5_K performance is limited by weight loading/dequant overhead, not LDS bank conflicts
+---
+ ggml/src/ggml-cuda/mmq.cuh | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index d93e1601..ba293274 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -2208,8 +2208,8 @@ static __device__ __forceinline__ void vec_dot_q4_K_q8_1_dp4a(
+                 const uint8_t * sc = (const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/32] + 2*(k01/16);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_K_q8_1_impl_mmq(
+-                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
+-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
++                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2365,8 +2365,8 @@ static __device__ __forceinline__ void vec_dot_q5_K_q8_1_dp4a(
+                 const uint8_t * sc = ((const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k00/32]) + 2*(k01/16);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q5_K_q8_1_impl_mmq(
+-                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
+-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
++                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2486,8 +2486,8 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_dp4a(
+                 const int8_t * sc = ((const int8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/16]);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q6_K_q8_1_impl_mmq(
+-                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc,
+-                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc,
++                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2529,10 +2529,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+ #pragma unroll
+         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+             tile_B B[1];
+-            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
++            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
+ 
+             const int j = j0 + tile_C::get_j(0);
+-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1] / 2;
++            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1] / 2;
+ 
+ #pragma unroll
+             for (int n = 0; n < ntx; ++n) {
+@@ -2558,7 +2558,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+     constexpr int rows_per_warp = granularity;
+     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+ 
+-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
++    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
+ 
+     const int   * x_qs = (const int   *) x;
+     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
+@@ -2580,10 +2580,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+ #pragma unroll
+         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+             tile_B B;
+-            load_generic(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
++            load_generic(B, y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
+ 
+             const int j = j0 + tile_C::get_j(0);
+-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
++            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1];
+ 
+ #pragma unroll
+             for (int n = 0; n < ntx; ++n) {
+@@ -2609,7 +2609,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+     constexpr int rows_per_warp = 2 * granularity;
+     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+ 
+-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
++    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
+ 
+     const int   * x_qs = (const int   *) x;
+     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
+-- 
+2.52.0
+
