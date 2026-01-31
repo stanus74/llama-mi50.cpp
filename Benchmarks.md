@@ -100,4 +100,11 @@ load_backend: loaded CPU backend from /opt/llama-mi50.cpp/build/bin/libggml-cpu.
 build: 4dcb6f81 (7893)
 
 ---
-https://www.vitamindoctor.com/news-blog/saeureblocker
+| model                          |       size |     params | backend    | ngl | n_ubatch | fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -------: | -: | --------------: | -------------------: |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |           pp512 |        724.57 ± 0.35 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp1024 |        757.46 ± 1.10 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp2048 |        737.48 ± 2.35 |
+| qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |           tg128 |         65.61 ± 0.03 |
+
+build: 49dac82c (7933)
