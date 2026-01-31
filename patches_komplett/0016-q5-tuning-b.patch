@@ -1,0 +1,38 @@
+From 04027745d0f559158abc007d2fc80d67559834f3 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 21:48:40 +0100
+Subject: [PATCH 16/16] q5 tuning-b
+
+---
+ ggml/src/ggml-cuda/mmq.cuh | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index 733d2478..19897597 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -147,6 +147,11 @@ static constexpr __device__ int get_mmq_x_max_device() {
+ }
+ 
+ static int get_mmq_y_host(const int cc) {
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
++#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
++#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
++#endif
++#endif
+ #if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
+     return GGML_HIP_MMQ_Y;
+ #else
+@@ -166,6 +171,9 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
+ static constexpr __device__ int get_mmq_y_device() {
+ #if defined(GGML_USE_HIP)
+ #if defined(GGML_HIP_MMQ_Y)
++#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
++#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
++#endif
+     return GGML_HIP_MMQ_Y;
+ #elif defined(RDNA1)
+     return 64;
+-- 
+2.52.0
+

@@ -1,0 +1,37 @@
+From 658afcfc47bc7d3c70c31509e504a1869bedb513 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 20:18:32 +0100
+Subject: [PATCH 06/16] Fix: Adjust GFX906 flash-attn occupancy targets
+
+- Reduce desired occupancy for specific DKQ=64/DV=64 configurations
+- Resolves 'failed to meet occupancy target' compiler warnings
+- Targets adjusted:
+  - ncols=2: 3 -> 2
+  - ncols=4: 3 -> 2
+  - ncols=16: 2 -> 1
+- Ensures optimal register usage without spilling on MI50
+---
+ ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+index 6555d17c..6ea5f340 100644
+--- a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+@@ -25,10 +25,10 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_q8_get_config
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40, 32, 256, 2,  32,  40)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40, 64, 256, 2,  32,  40)
+ 
+-    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  2,  64, 3,  32,  64)
+-    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  4, 128, 3,  64,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  2,  64, 2,  32,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  4, 128, 2,  64,  64)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  8, 128, 2,  32,  64)
+-    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 16, 256, 2, 128,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 16, 256, 1, 128,  64)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 32, 256, 2,  64,  64)
+     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 64, 256, 2,  64,  64)
+ 
+-- 
+2.52.0
+

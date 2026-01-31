@@ -1,0 +1,30 @@
+From 0f5400e3adb8d20f841d7cd2499a0b56155c3388 Mon Sep 17 00:00:00 2001
+From: stanus74 <holger.freier@gmail.com>
+Date: Fri, 30 Jan 2026 09:34:51 +0100
+Subject: [PATCH 6/7] CMake: build gfx906 Flash-Attn sources
+
+---
+ ggml/src/ggml-cuda/CMakeLists.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
+index d313c1ac..3e413784 100644
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -99,9 +99,13 @@ if (CUDAToolkit_FOUND)
+     message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} CMAKE_CUDA_ARCHITECTURES_NATIVE=${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+ 
+     file(GLOB   GGML_HEADERS_CUDA "*.cuh")
++    file(GLOB   SRCS "gfx906/*.cuh")
++    list(APPEND GGML_HEADERS_CUDA ${SRCS})
+     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+ 
+     file(GLOB   GGML_SOURCES_CUDA "*.cu")
++    file(GLOB   SRCS "gfx906/*.cu")
++    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
+-- 
+2.52.0
+
