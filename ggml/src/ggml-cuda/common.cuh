@@ -1166,7 +1166,6 @@ struct ggml_graph_node_properties {
     void * node_address;
     ggml_op node_op;
     enum ggml_type node_type;
-    int32_t flags;
     int64_t ne[GGML_MAX_DIMS];
     size_t nb[GGML_MAX_DIMS];
     int32_t flags;
