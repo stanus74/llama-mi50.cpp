@@ -607,12 +607,21 @@ static void mul_mat_vec_q_switch_type(
                     const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
                     const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
 
-                    gfx906_launch_mul_mat_vec_q5_K_warp_coop(
-                        vx, vy, ids, dst,
-                        ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
-                        channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
-                        sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
-                        nrows_x, nchannels_dst, nsamples_dst, stream);
+                    if (nrows_x < 8) {
+                        gfx906_launch_mul_mat_vec_q5_K_warp_coop_1row(
+                            vx, vy, ids, dst,
+                            ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
+                            channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                            sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                            nrows_x, nchannels_dst, nsamples_dst, stream);
+                    } else {
+                        gfx906_launch_mul_mat_vec_q5_K_warp_coop(
+                            vx, vy, ids, dst,
+                            ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
+                            channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                            sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                            nrows_x, nchannels_dst, nsamples_dst, stream);
+                    }
                     break;
                 }
             }

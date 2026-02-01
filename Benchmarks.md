@@ -108,3 +108,20 @@ build: 4dcb6f81 (7893)
 | qwen3 8B Q8_0                  |   8.11 GiB |     8.19 B | ROCm,ROCm  | 999 |     2048 |  1 |           tg128 |         65.61 ± 0.03 |
 
 build: 49dac82c (7933)
+
+###
+
+Kernel Optimierung Q5 
+
+Nr.1:
+| model                          |       size |     params | backend    | ngl | n_ubatch | fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -------: | -: | --------------: | -------------------: |
+| qwen3moe 30B.A3B Q5_K - Medium |  20.24 GiB |    30.53 B | ROCm,ROCm  | 999 |     2048 |  1 |           pp512 |        816.65 ± 3.76 |
+| qwen3moe 30B.A3B Q5_K - Medium |  20.24 GiB |    30.53 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp1024 |       1049.34 ± 2.49 |
+| qwen3moe 30B.A3B Q5_K - Medium |  20.24 GiB |    30.53 B | ROCm,ROCm  | 999 |     2048 |  1 |          pp2048 |       1172.21 ± 2.72 |
+| qwen3moe 30B.A3B Q5_K - Medium |  20.24 GiB |    30.53 B | ROCm,ROCm  | 999 |     2048 |  1 |           tg128 |         77.75 ± 0.30 |
+
+build: 69c4eef6 (7941)
+---
+
+Nr 2. 

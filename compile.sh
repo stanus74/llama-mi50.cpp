@@ -77,9 +77,9 @@ cmake .. \
     -DCMAKE_CXX_COMPILER=$ROCM_PATH/llvm/bin/clang++ \
     -DCMAKE_HIP_ARCHITECTURES="$AMDGPU_ARCH" \
     -DCMAKE_HIP_COMPILER_FORCED=1 \
-    -DCMAKE_C_FLAGS="-O3 -march=native -mtune=native -DNDEBUG -ffast-math -fno-finite-math-only -ffp-contract=fast" \
-    -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=native -DNDEBUG" \
-    -DCMAKE_HIP_FLAGS="-Wno-ignored-attributes -Wno-cuda-compat -Wno-unused-result" \
+    -DCMAKE_C_FLAGS="-O3 -march=native -mtune=native -DNDEBUG -ffast-math -fno-finite-math-only -ffp-contract=fast -w" \
+    -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=native -DNDEBUG -w" \
+    -DCMAKE_HIP_FLAGS="-Wno-ignored-attributes -Wno-cuda-compat -Wno-unused-result -w" \
     -DGGML_HIP=ON \
     -DGGML_HIP_GRAPHS=ON \
     -DGGML_HIP_NO_VMM=ON \
