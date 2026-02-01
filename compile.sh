@@ -48,7 +48,14 @@ else
     echo "⚠ ccache not found. Install with: apt install ccache"
 fi
 
-rm -rf build && mkdir -p build && cd build
+echo "🚀 Starte Caching-Build für MI50..."
+
+# Optional clean build (set CLEAN_BUILD=1)
+if [ "${CLEAN_BUILD:-0}" -eq 1 ]; then
+    rm -rf build
+fi
+
+mkdir -p build && cd build
 
 # Setup logging (set LOG_ENABLED=1 to enable file logging)
 LOG_ENABLED=${LOG_ENABLED:-0}
@@ -70,6 +77,8 @@ else
 fi
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
+    -Wno-dev \
+    -DCMAKE_SUPPRESS_DEVELOPER_WARNINGS=ON \
     -DCMAKE_C_COMPILER_LAUNCHER=$CMAKE_C_COMPILER_LAUNCHER \
     -DCMAKE_CXX_COMPILER_LAUNCHER=$CMAKE_CXX_COMPILER_LAUNCHER \
     -DCMAKE_HIP_COMPILER_LAUNCHER=$CMAKE_HIP_COMPILER_LAUNCHER \

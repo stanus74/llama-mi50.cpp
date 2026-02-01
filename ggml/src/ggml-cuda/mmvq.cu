@@ -607,7 +607,7 @@ static void mul_mat_vec_q_switch_type(
                     const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
                     const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
 
-                    if (nrows_x < 8) {
+                    if (nrows_x < 32) {
                         gfx906_launch_mul_mat_vec_q5_K_warp_coop_1row(
                             vx, vy, ids, dst,
                             ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
