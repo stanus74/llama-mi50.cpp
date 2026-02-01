@@ -46,21 +46,15 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
     float sumf = 0.0f;
 
     constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
-    __shared__ block_q8_1 y_shared[q8_blocks_per_q5];
     constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
 
     for (int ib = 0; ib < blocks_per_row; ib += 2) {
         // ib
-        int kby = ib * q8_blocks_per_q5;
-        if (lane_id < q8_blocks_per_q5) {
-            y_shared[lane_id] = y[kby + lane_id];
-        }
-        __syncthreads();
-
         float partial = 0.0f;
         if (half_lane < lanes_per_block) {
             const int iqs = vdr_q5_k * half_lane;
-            partial = vec_dot_q5_K_q8_1(x, y_shared, ib, iqs);
+            const int kby = ib * q8_blocks_per_q5;
+            partial = vec_dot_q5_K_q8_1(x, y + kby, ib, iqs);
         }
 
         partial = warp_reduce_sum<32>(partial);
@@ -69,20 +63,13 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
             sumf += partial;
         }
 
-        __syncthreads();
-
         // ib + 1
         if (ib + 1 < blocks_per_row) {
-            kby = (ib + 1) * q8_blocks_per_q5;
-            if (lane_id < q8_blocks_per_q5) {
-                y_shared[lane_id] = y[kby + lane_id];
-            }
-            __syncthreads();
-
             float partial1 = 0.0f;
             if (half_lane < lanes_per_block) {
                 const int iqs = vdr_q5_k * half_lane;
-                partial1 = vec_dot_q5_K_q8_1(x, y_shared, ib + 1, iqs);
+                const int kby = (ib + 1) * q8_blocks_per_q5;
+                partial1 = vec_dot_q5_K_q8_1(x, y + kby, ib + 1, iqs);
             }
 
             partial1 = warp_reduce_sum<32>(partial1);
@@ -90,8 +77,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
             if (half_lane == 0) {
                 sumf += partial1;
             }
-
-            __syncthreads();
         }
     }
 
@@ -138,21 +123,15 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop_1row(
     float sumf = 0.0f;
 
     constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
-    __shared__ block_q8_1 y_shared[q8_blocks_per_q5];
     constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
 
     for (int ib = 0; ib < blocks_per_row; ib += 2) {
         // ib
-        int kby = ib * q8_blocks_per_q5;
-        if (lane_id < q8_blocks_per_q5) {
-            y_shared[lane_id] = y[kby + lane_id];
-        }
-        __syncthreads();
-
         float partial = 0.0f;
         if (lane_id < lanes_per_block) {
             const int iqs = vdr_q5_k * lane_id;
-            partial = vec_dot_q5_K_q8_1(x, y_shared, ib, iqs);
+            const int kby = ib * q8_blocks_per_q5;
+            partial = vec_dot_q5_K_q8_1(x, y + kby, ib, iqs);
         }
 
         partial = warp_reduce_sum<32>(partial);
@@ -161,20 +140,13 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop_1row(
             sumf += partial;
         }
 
-        __syncthreads();
-
         // ib + 1
         if (ib + 1 < blocks_per_row) {
-            kby = (ib + 1) * q8_blocks_per_q5;
-            if (lane_id < q8_blocks_per_q5) {
-                y_shared[lane_id] = y[kby + lane_id];
-            }
-            __syncthreads();
-
             float partial1 = 0.0f;
             if (lane_id < lanes_per_block) {
                 const int iqs = vdr_q5_k * lane_id;
-                partial1 = vec_dot_q5_K_q8_1(x, y_shared, ib + 1, iqs);
+                const int kby = (ib + 1) * q8_blocks_per_q5;
+                partial1 = vec_dot_q5_K_q8_1(x, y + kby, ib + 1, iqs);
             }
 
             partial1 = warp_reduce_sum<32>(partial1);
@@ -182,8 +154,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop_1row(
             if (lane_id == 0) {
                 sumf += partial1;
             }
-
-            __syncthreads();
         }
     }
 
