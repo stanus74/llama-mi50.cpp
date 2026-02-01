@@ -55,6 +55,7 @@ LOG_FILE="../build_$(date +%Y%m%d_%H%M%S).log"
 echo "📝 Build logs will be saved to: $LOG_FILE" >&2
 
 # CMake configuration (log to file)
+# Optional: set GGML_HIP_MMQ_Y in the environment to pass -DGGML_HIP_MMQ_Y=<value>
 echo "=== CMAKE CONFIGURATION ===" | tee -a "$LOG_FILE"
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
@@ -72,7 +73,7 @@ cmake .. \
     -DGGML_HIP_GRAPHS=ON \
     -DGGML_HIP_NO_VMM=ON \
     -DGGML_HIP_EXPORT_METRICS=ON \
-    #-DGGML_HIP_MMQ_Y=96 \
+    ${GGML_HIP_MMQ_Y:+-DGGML_HIP_MMQ_Y=$GGML_HIP_MMQ_Y} \
     -DGGML_NATIVE=ON \
     -DGGML_CUDA_FA=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=ON \
