@@ -50,13 +50,24 @@ fi
 
 rm -rf build && mkdir -p build && cd build
 
-# Setup logging
+# Setup logging (set LOG_ENABLED=1 to enable file logging)
+LOG_ENABLED=${LOG_ENABLED:-0}
 LOG_FILE="../build_$(date +%Y%m%d_%H%M%S).log"
-echo "📝 Build logs will be saved to: $LOG_FILE" >&2
+WARNINGS_LOG="${LOG_FILE%.log}_warnings.log"
+FILTERED_WARNINGS_LOG="${LOG_FILE%.log}_warnings_filtered.log"
+if [ "$LOG_ENABLED" -eq 1 ]; then
+    echo "📝 Build logs will be saved to: $LOG_FILE" >&2
+fi
 
 # CMake configuration (log to file)
 # Optional: set GGML_HIP_MMQ_Y in the environment to pass -DGGML_HIP_MMQ_Y=<value>
-echo "=== CMAKE CONFIGURATION ===" | tee -a "$LOG_FILE"
+if [ "$LOG_ENABLED" -eq 1 ]; then
+    echo "=== CMAKE CONFIGURATION ===" | tee -a "$LOG_FILE"
+    CMAKE_LOG_CMD="tee -a $LOG_FILE"
+else
+    echo "=== CMAKE CONFIGURATION ==="
+    CMAKE_LOG_CMD="cat"
+fi
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER_LAUNCHER=$CMAKE_C_COMPILER_LAUNCHER \
@@ -85,23 +96,54 @@ cmake .. \
     -DLLAMA_BUILD_TOOLS=ON \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_CURL=ON \
-    -DLLAMA_STATIC=OFF 2>&1 | tee -a "$LOG_FILE"
+    -DLLAMA_STATIC=OFF 2>&1 | eval "$CMAKE_LOG_CMD"
 
 # Make build (log to file)
-echo "" | tee -a "$LOG_FILE"
-echo "=== BUILDING ===" | tee -a "$LOG_FILE"
-make -j$(nproc) 2>&1 | tee -a "$LOG_FILE"
+if [ "$LOG_ENABLED" -eq 1 ]; then
+    echo "" | tee -a "$LOG_FILE"
+    echo "=== BUILDING ===" | tee -a "$LOG_FILE"
+    BUILD_LOG_CMD="tee -a $LOG_FILE"
+else
+    echo ""
+    echo "=== BUILDING ==="
+    BUILD_LOG_CMD="cat"
+fi
+make -j$(nproc) 2>&1 | eval "$BUILD_LOG_CMD"
 
 BUILD_STATUS=$?
-echo "" | tee -a "$LOG_FILE"
+if [ "$LOG_ENABLED" -eq 1 ]; then
+    echo "" | tee -a "$LOG_FILE"
+else
+    echo ""
+fi
+
+# Extract warnings (raw + filtered) from the build log
+if [ "$LOG_ENABLED" -eq 1 ]; then
+    grep -i "warning" "$LOG_FILE" > "$WARNINGS_LOG" || true
+    grep -i "warning" "$LOG_FILE" | \
+        grep -viE "loop not unrolled|gpu-max-threads-per-block|ISO C restricts enumerator values|no previous prototype" \
+        > "$FILTERED_WARNINGS_LOG" || true
+fi
 
 if [ $BUILD_STATUS -eq 0 ]; then
-    echo "✅ Build complete!" | tee -a "$LOG_FILE"
-    echo "   Binaries: ./build/bin/{llama-cli,llama-server,llama-bench}" | tee -a "$LOG_FILE"
-    echo "   GPU Arch: $AMDGPU_ARCH" | tee -a "$LOG_FILE"
-    echo "   Log file: $LOG_FILE" | tee -a "$LOG_FILE"
+    if [ "$LOG_ENABLED" -eq 1 ]; then
+        echo "✅ Build complete!" | tee -a "$LOG_FILE"
+        echo "   Binaries: ./build/bin/{llama-cli,llama-server,llama-bench}" | tee -a "$LOG_FILE"
+        echo "   GPU Arch: $AMDGPU_ARCH" | tee -a "$LOG_FILE"
+        echo "   Log file: $LOG_FILE" | tee -a "$LOG_FILE"
+        echo "   Warnings: $WARNINGS_LOG" | tee -a "$LOG_FILE"
+        echo "   Warnings (filtered): $FILTERED_WARNINGS_LOG" | tee -a "$LOG_FILE"
+    else
+        echo "✅ Build complete!"
+        echo "   Binaries: ./build/bin/{llama-cli,llama-server,llama-bench}"
+        echo "   GPU Arch: $AMDGPU_ARCH"
+    fi
 else
-    echo "❌ Build FAILED! See $LOG_FILE for details" | tee -a "$LOG_FILE"
+    if [ "$LOG_ENABLED" -eq 1 ]; then
+        echo "❌ Build FAILED! See $LOG_FILE for details" | tee -a "$LOG_FILE"
+    else
+        echo "❌ Build FAILED!"
+    fi
     exit 1
 fi
 
