@@ -48,8 +48,7 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
     constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
     constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
 
-    for (int ib = 0; ib < blocks_per_row; ib += 2) {
-        // ib
+    for (int ib = 0; ib < blocks_per_row; ib++) {
         float partial = 0.0f;
         if (half_lane < lanes_per_block) {
             const int iqs = vdr_q5_k * half_lane;
@@ -61,22 +60,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
 
         if (half_lane == 0) {
             sumf += partial;
-        }
-
-        // ib + 1
-        if (ib + 1 < blocks_per_row) {
-            float partial1 = 0.0f;
-            if (half_lane < lanes_per_block) {
-                const int iqs = vdr_q5_k * half_lane;
-                const int kby = (ib + 1) * q8_blocks_per_q5;
-                partial1 = vec_dot_q5_K_q8_1(x, y + kby, ib + 1, iqs);
-            }
-
-            partial1 = warp_reduce_sum<32>(partial1);
-
-            if (half_lane == 0) {
-                sumf += partial1;
-            }
         }
     }
 
@@ -125,8 +108,7 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop_1row(
     constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
     constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
 
-    for (int ib = 0; ib < blocks_per_row; ib += 2) {
-        // ib
+    for (int ib = 0; ib < blocks_per_row; ib++) {
         float partial = 0.0f;
         if (lane_id < lanes_per_block) {
             const int iqs = vdr_q5_k * lane_id;
@@ -138,22 +120,6 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop_1row(
 
         if (lane_id == 0) {
             sumf += partial;
-        }
-
-        // ib + 1
-        if (ib + 1 < blocks_per_row) {
-            float partial1 = 0.0f;
-            if (lane_id < lanes_per_block) {
-                const int iqs = vdr_q5_k * lane_id;
-                const int kby = (ib + 1) * q8_blocks_per_q5;
-                partial1 = vec_dot_q5_K_q8_1(x, y + kby, ib + 1, iqs);
-            }
-
-            partial1 = warp_reduce_sum<32>(partial1);
-
-            if (lane_id == 0) {
-                sumf += partial1;
-            }
         }
     }
 
