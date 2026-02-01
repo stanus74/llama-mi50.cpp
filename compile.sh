@@ -50,6 +50,12 @@ fi
 
 rm -rf build && mkdir -p build && cd build
 
+# Setup logging
+LOG_FILE="../build_$(date +%Y%m%d_%H%M%S).log"
+echo "📝 Build logs will be saved to: $LOG_FILE" >&2
+
+# CMake configuration (log to file)
+echo "=== CMAKE CONFIGURATION ===" | tee -a "$LOG_FILE"
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER_LAUNCHER=$CMAKE_C_COMPILER_LAUNCHER \
@@ -66,7 +72,7 @@ cmake .. \
     -DGGML_HIP_GRAPHS=ON \
     -DGGML_HIP_NO_VMM=ON \
     -DGGML_HIP_EXPORT_METRICS=ON \
-    -DGGML_HIP_MMQ_Y=96 \
+    #-DGGML_HIP_MMQ_Y=96 \
     -DGGML_NATIVE=ON \
     -DGGML_CUDA_FA=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=ON \
@@ -78,13 +84,23 @@ cmake .. \
     -DLLAMA_BUILD_TOOLS=ON \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_CURL=ON \
-    -DLLAMA_STATIC=OFF
+    -DLLAMA_STATIC=OFF 2>&1 | tee -a "$LOG_FILE"
 
-make -j$(nproc)
+# Make build (log to file)
+echo "" | tee -a "$LOG_FILE"
+echo "=== BUILDING ===" | tee -a "$LOG_FILE"
+make -j$(nproc) 2>&1 | tee -a "$LOG_FILE"
 
-echo ""
-echo "✅ Build complete!"
-echo "   Binaries: ./build/bin/{llama-cli,llama-server,llama-bench}"
-echo "   GPU Arch: $AMDGPU_ARCH"
-echo ""
+BUILD_STATUS=$?
+echo "" | tee -a "$LOG_FILE"
+
+if [ $BUILD_STATUS -eq 0 ]; then
+    echo "✅ Build complete!" | tee -a "$LOG_FILE"
+    echo "   Binaries: ./build/bin/{llama-cli,llama-server,llama-bench}" | tee -a "$LOG_FILE"
+    echo "   GPU Arch: $AMDGPU_ARCH" | tee -a "$LOG_FILE"
+    echo "   Log file: $LOG_FILE" | tee -a "$LOG_FILE"
+else
+    echo "❌ Build FAILED! See $LOG_FILE for details" | tee -a "$LOG_FILE"
+    exit 1
+fi
 
