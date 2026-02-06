@@ -1224,6 +1224,11 @@ struct ggml_cuda_graph {
 
     bool is_enabled() const {
         static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
+        #if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
+        // Auf AMD: Graphs bei hohem Kontext deaktivieren via Env-Variable
+        static const bool amd_disable_graphs = (getenv("GGML_AMD_DISABLE_GRAPHS") != nullptr);
+        if (amd_disable_graphs) return false;
+        #endif
         return cuda_graphs_enabled && !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env ||
             disable_due_to_too_many_updates || disable_due_to_failed_graph_capture);
     }
