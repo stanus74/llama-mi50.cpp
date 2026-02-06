@@ -43,7 +43,7 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
     const block_q5_K * x = (const block_q5_K *)vx + kbx_offset;
     const block_q8_1 * y = (const block_q8_1 *)vy + sample_y * stride_sample_y + channel_y * stride_channel_y;
 
-    __half sumf = 0.0h;  // FP16 accumulation for reduced register usage (~50% less VRAM)
+    float sumf = 0.0f;
 
     constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
     constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
@@ -59,12 +59,12 @@ static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
         partial = warp_reduce_sum<32>(partial);
 
         if (half_lane == 0) {
-            sumf = __hadd(sumf, __float2half(partial));  // Explicit half accumulation
+            sumf += partial;
         }
     }
 
     if (half_lane == 0) {
-        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = __half2float(sumf);  // Convert back to FP32 for output
+        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = sumf;
     }
 }
 
