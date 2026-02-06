@@ -2922,9 +2922,9 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
     return use_cuda_graph;
 }
 
-static void ggml_cuda_graph_node_set_properties(ggml_graph_node_properties * props, ggml_tensor * node) {
-    memset(props, 0, sizeof(ggml_graph_node_properties));
-    props->node_address = node->data;
+static void ggml_cuda_graph_node_set_properties(ggml_cuda_graph_node_properties * props, ggml_tensor * node) {
+    memset(props, 0, sizeof(ggml_cuda_graph_node_properties));
+    props->node_data = node->data;
     props->node_op = node->op;
     props->node_type = node->type;
     props->flags = node->flags;
@@ -2942,8 +2942,8 @@ static void ggml_cuda_graph_node_set_properties(ggml_graph_node_properties * pro
     memcpy(props->op_params, node->op_params, GGML_MAX_OP_PARAMS);
 }
 
-static bool ggml_cuda_graph_node_properties_match(ggml_tensor * node, ggml_graph_node_properties * props) {
-    if (node->data != props->node_address && node->op != GGML_OP_VIEW) {
+static bool ggml_cuda_graph_node_properties_match(ggml_tensor * node, ggml_cuda_graph_node_properties * props) {
+    if (node->data != props->node_data && node->op != GGML_OP_VIEW) {
         return false;
     }
 
@@ -2979,8 +2979,7 @@ static bool ggml_cuda_graph_node_properties_match(ggml_tensor * node, ggml_graph
         }
     }
 
-    if ((node->op == GGML_OP_SCALE || node->op == GGML_OP_GLU) &&
-        memcmp(props->op_params, node->op_params, GGML_MAX_OP_PARAMS) != 0) {
+    if (memcmp(props->op_params, node->op_params, GGML_MAX_OP_PARAMS) != 0) {
         return false;
     }
 
@@ -3006,9 +3005,9 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
     }
 
     // Check if the graph size has changed
-    if (graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
+    if (graph->props.size() != (size_t)cgraph->n_nodes) {
         res = true;
-        graph->ggml_graph_properties.resize(cgraph->n_nodes);
+        graph->props.resize(cgraph->n_nodes);
     }
 
     // Loop over nodes in GGML graph to determine if CUDA graph update is required
@@ -3021,12 +3020,12 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
         seen_node.insert(cgraph->nodes[i]);
 
         if (!res) {
-            props_match = ggml_cuda_graph_node_properties_match(cgraph->nodes[i], &graph->ggml_graph_properties[i]);
+            props_match = ggml_cuda_graph_node_properties_match(cgraph->nodes[i], &graph->props[i]);
         }
         if (!props_match) {
             res = true;
         }
-        ggml_cuda_graph_node_set_properties(&graph->ggml_graph_properties[i], cgraph->nodes[i]);
+        ggml_cuda_graph_node_set_properties(&graph->props[i], cgraph->nodes[i]);
 
         for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
             ggml_tensor * src = cgraph->nodes[i]->src[src_idx];
@@ -5115,21 +5114,4 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
     return cuda_backend;
 }
 
-static int ggml_backend_cuda_score_impl(void) {
-    return ggml_backend_cuda_get_device_count() > 0 ? 100 : 0;
-}
-
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
-GGML_BACKEND_DL_SCORE_IMPL(ggml_backend_cuda_score_impl)
-
-#ifndef GGML_BACKEND_DL
-extern "C" {
-GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
-    return ggml_backend_cuda_reg();
-}
-
-GGML_BACKEND_API int ggml_backend_score(void) {
-    return ggml_backend_cuda_score_impl();
-}
-}
-#endif
