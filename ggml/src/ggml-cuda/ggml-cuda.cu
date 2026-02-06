@@ -387,7 +387,9 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
             return ptr;
         }
         void * ptr;
-        size_t look_ahead_size = (size_t) (1.05 * size);
+        // Reduziere Look-Ahead für MI50 bei großen Allokationen (>100MB)
+        float look_ahead_factor = (size > 100 * 1024 * 1024) ? 1.01f : 1.05f;
+        size_t look_ahead_size = (size_t) (look_ahead_factor * size);
         look_ahead_size = 256 * ((look_ahead_size + 255)/256);
         ggml_cuda_set_device(device);
         CUDA_CHECK(ggml_cuda_device_malloc(&ptr, look_ahead_size, device));
