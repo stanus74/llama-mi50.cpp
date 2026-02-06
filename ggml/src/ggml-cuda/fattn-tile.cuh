@@ -132,6 +132,14 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_nv
 }
 
 static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_amd(const int DKQ, const int DV, const int ncols) {
+    // MI50 (gfx906): Kleinere nbatch_fa für weniger Speicher-Peaks bei großen Kontexten
+    #ifdef __gfx906__
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  8, 128, 2,  32,  64)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  8, 256, 2,  32, 128)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 256, 2,  32, 128)
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(576, 512,  8, 256, 2,  32,  64)
+    #endif
+
     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  2,  64, 2,  32,  40)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  4, 128, 2,  32,  40)
     GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  8, 256, 2,  32,  40)
