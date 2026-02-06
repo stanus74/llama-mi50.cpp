@@ -1205,12 +1205,20 @@ struct ggml_cuda_graph {
     void record_update(bool use_graph, bool update_required) {
         if (use_graph && update_required) {
             number_consecutive_updates++;
+            // MI50: Beim ersten Update bereits deaktivieren, nicht erst nach 4
+            #if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
+            if (number_consecutive_updates >= 1) {
+                GGML_LOG_DEBUG("%s: disabling CUDA graphs to prevent OOM at high context\n", __func__);
+                disable_due_to_too_many_updates = true;
+            }
+            #else
+            if (number_consecutive_updates >= 4) {
+                GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
+                disable_due_to_too_many_updates = true;
+            }
+            #endif
         } else {
             number_consecutive_updates = 0;
-        }
-        if (number_consecutive_updates >= 4) {
-            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
-            disable_due_to_too_many_updates = true;
         }
     }
 
