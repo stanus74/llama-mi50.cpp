@@ -14,7 +14,9 @@
 //     by the VKQ accumulators is effectively being shifted up by a factor of 8.
 // This reduces issues with numerical overflow but also causes larger values to be flushed to zero.
 // However, as the output from FlashAttention will usually be used as an input for a matrix multiplication this should be negligible.
-#define FATTN_KQ_MAX_OFFSET 0.6931f
+// Still, the value range should be shifted as much as necessary but as little as possible.
+// The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
+#define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
 
 typedef void (* fattn_kernel_t)(
         const char * __restrict__ Q,
