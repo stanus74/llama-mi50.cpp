@@ -41,6 +41,7 @@
 - ggml/src/ggml-cuda/ggml-cuda.cu: Backend-Integration und Pfadwahl.
 
 ## Kategorie C - Flash-Attention (GCN/CDNA Tuning)
+- Status: erledigt.
 - Vergleiche Aenderungen in ggml/src/ggml-cuda/fattn-common.cuh.
 - Vergleiche Aenderungen in ggml/src/ggml-cuda/fattn.cu.
 - Ordne GFX906-Q8 Attention-Kernel unter ggml/src/ggml-cuda/gfx906/attention ein.
@@ -78,6 +79,7 @@
 - ggml/src/ggml-cuda/mmid.cu: Korrektheitsfixes fuer grosse Expert-Zahlen.
 
 ## Kategorie F - GPU Utility / Basis-Optimierung
+- Status: erledigt.
 - Pruefe DPP-basierte Warp-Reduktionen und Shuffle-Dispatch in ggml/src/ggml-cuda/common.cuh.
 - Pruefe gfx906 Hilfsheader in ggml/src/ggml-cuda/gfx906/gfx906-common.cuh und ggml/src/ggml-cuda/gfx906/gfx906-config.h.
 - ggml/src/ggml-cuda/common.cuh: Warp-Reduktionen und Shuffle Dispatch (DPP Pfad).
@@ -88,9 +90,11 @@
 - GFX906 DPP Utils und Konfigurationen anlegen in [ggml/src/ggml-cuda/gfx906/gfx906-common.cuh](ggml/src/ggml-cuda/gfx906/gfx906-common.cuh) und [ggml/src/ggml-cuda/gfx906/gfx906-config.h](ggml/src/ggml-cuda/gfx906/gfx906-config.h).
 
 ## Kategorie G - Build-System / HIP Integration
+- Status: erledigt.
 - Pruefe Build-Integration fuer gfx906-Quellen in ggml/src/ggml-cuda/CMakeLists.txt.
 - ggml/src/ggml-cuda/CMakeLists.txt: GFX906 Quellen in Build einbinden.
 - Aenderung merken: gfx906 Globs hinzufuegen (gfx906/*.cuh, gfx906/*.cu, gfx906/fused/*.cu, gfx906/attention/*.cu, gfx906/attention/instances/*.cu).
+- Diff-Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff.
 
 ## Kategorie H - Tooling / Scripts
 - Pruefe MI50 Build- und Bench-Skripte und aktualisiere Pfade/Flags bei Bedarf.
