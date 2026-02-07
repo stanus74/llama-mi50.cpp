@@ -90,6 +90,7 @@
 ## Kategorie G - Build-System / HIP Integration
 - Pruefe Build-Integration fuer gfx906-Quellen in ggml/src/ggml-cuda/CMakeLists.txt.
 - ggml/src/ggml-cuda/CMakeLists.txt: GFX906 Quellen in Build einbinden.
+- Aenderung merken: gfx906 Globs hinzufuegen (gfx906/*.cuh, gfx906/*.cu, gfx906/fused/*.cu, gfx906/attention/*.cu, gfx906/attention/instances/*.cu).
 
 ## Kategorie H - Tooling / Scripts
 - Pruefe MI50 Build- und Bench-Skripte und aktualisiere Pfade/Flags bei Bedarf.

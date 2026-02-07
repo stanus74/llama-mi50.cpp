@@ -990,14 +990,14 @@ void ggml_cuda_flash_attn_ext_tile_q8_case(ggml_backend_cuda_context & ctx, ggml
 
 void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
-#define DECL_FATTN_TILE_CASE(DKQ, DV)                             \
-    template void ggml_cuda_flash_attn_ext_tile_q8_case              \
+#define DECL_FATTN_TILE_Q8_CASE(DKQ, DV)                          \
+    template void ggml_cuda_flash_attn_ext_tile_q8_case            \
     <DKQ, DV>(ggml_backend_cuda_context & ctx, ggml_tensor * dst) \
 
-extern DECL_FATTN_TILE_CASE( 40,  40);
-extern DECL_FATTN_TILE_CASE( 64,  64);
-extern DECL_FATTN_TILE_CASE( 80,  80);
-extern DECL_FATTN_TILE_CASE( 96,  96);
-extern DECL_FATTN_TILE_CASE(112, 112);
-extern DECL_FATTN_TILE_CASE(128, 128);
-extern DECL_FATTN_TILE_CASE(256, 256);
+extern DECL_FATTN_TILE_Q8_CASE( 40,  40);
+extern DECL_FATTN_TILE_Q8_CASE( 64,  64);
+extern DECL_FATTN_TILE_Q8_CASE( 80,  80);
+extern DECL_FATTN_TILE_Q8_CASE( 96,  96);
+extern DECL_FATTN_TILE_Q8_CASE(112, 112);
+extern DECL_FATTN_TILE_Q8_CASE(128, 128);
+extern DECL_FATTN_TILE_Q8_CASE(256, 256);
