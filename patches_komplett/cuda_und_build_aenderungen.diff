@@ -1,0 +1,3300 @@
+diff --git a/ggml/src/ggml-cuda/CMakeLists.txt b/ggml/src/ggml-cuda/CMakeLists.txt
+index d313c1ac..ed25dbd2 100644
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -47,10 +47,7 @@ if (CUDAToolkit_FOUND)
+                 #     check Modules/Internal/CMakeCUDAArchitecturesValidate.cmake in the CMake git repository instead.
+                 # However, the architectures 120a-real and 121a-real should work with basically any CMake version and
+                 #     until the release of e.g. Rubin there is no benefit to shipping virtual architectures for Blackwell.
+-                list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real)
+-            endif()
+-            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
+-                list(APPEND CMAKE_CUDA_ARCHITECTURES 121a-real)
++                list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real 121a-real)
+             endif()
+         endif()
+     endif()
+@@ -99,9 +96,13 @@ if (CUDAToolkit_FOUND)
+     message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} CMAKE_CUDA_ARCHITECTURES_NATIVE=${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+ 
+     file(GLOB   GGML_HEADERS_CUDA "*.cuh")
++    file(GLOB   SRCS "gfx906/*.cuh")
++    list(APPEND GGML_HEADERS_CUDA ${SRCS})
+     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+ 
+     file(GLOB   GGML_SOURCES_CUDA "*.cu")
++    file(GLOB   SRCS "gfx906/*.cu")
++    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 43280644..d4aec1cb 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -402,6 +402,35 @@ struct ggml_cuda_unroll<1> {
+     }
+ };
+ 
++// ================================================================================================
++// AMD GFX906 DPP-based Warp Reductions
++// ================================================================================================
++// All AMD GFX906-specific DPP optimizations moved to gfx906/gfx906-common.cuh
++// ================================================================================================
++
++#ifdef GGML_USE_HIP
++#include "gfx906/gfx906-common.cuh"
++#endif // GGML_USE_HIP
++
++// ============================================================================
++// Unified shuffle XOR operation - dispatches to DPP on AMD, shuffle on NVIDIA
++// ============================================================================
++template<int width = WARP_SIZE, typename T>
++static __device__ __forceinline__ T ggml_cuda_shfl_xor_sync(T x, int offset) {
++#if defined(GGML_USE_HIP)
++    switch (~offset) {
++        case ~1:  return hip_dpp_xor1(x);
++        case ~2:  return hip_dpp_xor2(x);
++        case ~4:  return hip_dpp_xor4(x);
++        case ~8:  return hip_dpp_xor8(x);
++        case ~16: return hip_dpp_xor16(x);
++        default:  return __shfl_xor(x, offset, width);
++    }
++#else
++    return __shfl_xor_sync(0xffffffff, x, offset, width);
++#endif
++}
++
+ template<int width = WARP_SIZE>
+ static __device__ __forceinline__ int warp_reduce_sum(int x) {
+ #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+@@ -409,7 +438,7 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
+ #else
+ #pragma unroll
+     for (int offset = width/2; offset > 0; offset >>= 1) {
+-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
++        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
+     }
+     return x;
+ #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+@@ -417,19 +446,23 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
+ 
+ template<int width = WARP_SIZE>
+ static __device__ __forceinline__ float warp_reduce_sum(float x) {
++#if defined(GGML_USE_HIP)
++    return warp_reduce_amd_f32<width, AddOp>(x);
++#else
+ #pragma unroll
+     for (int offset = width/2; offset > 0; offset >>= 1) {
+-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
++        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
+     }
+     return x;
++#endif
+ }
+ 
+ template<int width = WARP_SIZE>
+ static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
+ #pragma unroll
+     for (int offset = width/2; offset > 0; offset >>= 1) {
+-        a.x += __shfl_xor_sync(0xffffffff, a.x, offset, width);
+-        a.y += __shfl_xor_sync(0xffffffff, a.y, offset, width);
++        a.x += ggml_cuda_shfl_xor_sync<width>(a.x, offset);
++        a.y += ggml_cuda_shfl_xor_sync<width>(a.y, offset);
+     }
+     return a;
+ }
+@@ -439,7 +472,7 @@ static __device__ __forceinline__ half2 warp_reduce_sum(half2 a) {
+ #ifdef FP16_AVAILABLE
+ #pragma unroll
+     for (int offset = width/2; offset > 0; offset >>= 1) {
+-        a = __hadd2(a, __shfl_xor_sync(0xffffffff, a, offset, width));
++        a = __hadd2(a, ggml_cuda_shfl_xor_sync<width>(a, offset));
+     }
+     return a;
+ 
+@@ -456,7 +489,7 @@ static __device__ __forceinline__ int warp_reduce_all(int x) {
+     } else {
+ #pragma unroll
+         for (int offset = width/2; offset > 0; offset >>= 1) {
+-            x = __shfl_xor_sync(0xffffffff, x, offset, width) && x;
++            x = ggml_cuda_shfl_xor_sync<width>(x, offset) && x;
+         }
+         return x;
+     }
+@@ -469,7 +502,7 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
+     } else {
+ #pragma unroll
+         for (int offset = width/2; offset > 0; offset >>= 1) {
+-            x = __shfl_xor_sync(0xffffffff, x, offset, width) || x;
++            x = ggml_cuda_shfl_xor_sync<width>(x, offset) || x;
+         }
+         return x;
+     }
+@@ -477,11 +510,15 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
+ 
+ template<int width = WARP_SIZE>
+ static __device__ __forceinline__ float warp_reduce_max(float x) {
++#if defined(GGML_USE_HIP)
++    return warp_reduce_amd_f32<width, MaxOp>(x);
++#else
+ #pragma unroll
+     for (int offset = width/2; offset > 0; offset >>= 1) {
+-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
++        x = fmaxf(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
+     }
+     return x;
++#endif
+ }
+ 
+ template<typename T, int width = WARP_SIZE>
+@@ -645,7 +682,7 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
+ #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
+ #pragma unroll
+    for (int offset = width/2; offset > 0; offset >>= 1) {
+-       x = ggml_cuda_hmax2(x, __shfl_xor_sync(0xffffffff, x, offset, width));
++       x = ggml_cuda_hmax2(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
+    }
+    return x;
+ #else
+@@ -785,6 +822,10 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
+ #if CUDART_VERSION >= 12080
+     const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
+     return (float) e;
++#elif defined(GGML_USE_HIP) && defined(__gfx906__)
++    // GFX906: Branchless with direct bit cast
++    const uint32_t bits = x ? ((uint32_t) x << 23) : 0x00400000u;
++    return __uint_as_float(bits);
+ #else
+     uint32_t bits;
+     if (x == 0) {
+@@ -1121,17 +1162,17 @@ struct ggml_tensor_extra_gpu {
+ #define USE_CUDA_GRAPH
+ #endif
+ 
+-struct ggml_cuda_graph_node_properties {
+-    void * node_data;
++struct ggml_graph_node_properties {
++    void * node_address;
+     ggml_op node_op;
+-    int32_t flags;
+     int64_t ne[GGML_MAX_DIMS];
+     size_t nb[GGML_MAX_DIMS];
++    int32_t flags;
+     void * src_data[GGML_MAX_SRC];
+     int32_t op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t)];
+ };
+ 
+-static_assert(std::is_trivial<ggml_cuda_graph_node_properties>::value, "ggml_cuda_graph_node_properties must be trivial");
++static_assert(std::is_trivial<ggml_graph_node_properties>::value, "ggml_graph_node_properties must be trivial");
+ 
+ struct ggml_cuda_graph {
+ #ifdef USE_CUDA_GRAPH
+@@ -1149,14 +1190,16 @@ struct ggml_cuda_graph {
+     std::vector<cudaGraphNode_t> nodes;
+     bool disable_due_to_gpu_arch = false;
+     bool disable_due_to_too_many_updates = false;
++    bool disable_due_to_failed_graph_capture = false;
+     int number_consecutive_updates = 0;
+-    std::vector<ggml_cuda_graph_node_properties> props;
++    bool cuda_graphs_enabled = false;
++    std::vector<ggml_graph_node_properties> ggml_graph_properties;
+ 
+     // these are extra tensors (inputs) that participate in the ggml graph but are not nodes
+     // they properties also have to match in order to be able to safely reuse a CUDA graph
+     // ref: https://github.com/ggml-org/llama.cpp/pull/18583
+     // ref: https://github.com/ggml-org/llama.cpp/pull/19165
+-    std::vector<ggml_cuda_graph_node_properties> extra;
++    std::vector<ggml_graph_node_properties> extra;
+ 
+     void record_update(bool use_graph, bool update_required) {
+         if (use_graph && update_required) {
+@@ -1172,7 +1215,8 @@ struct ggml_cuda_graph {
+ 
+     bool is_enabled() const {
+         static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
+-        return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env || disable_due_to_too_many_updates);
++        return cuda_graphs_enabled && !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env ||
++            disable_due_to_too_many_updates || disable_due_to_failed_graph_capture);
+     }
+ #endif
+ };
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index b6a7460d..b982bd6d 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -276,8 +276,8 @@ static __device__ __forceinline__ void quantize_q8_1_to_shared(
+     }
+ #pragma unroll
+     for (int mask = QI8_1/2; mask > 0; mask >>= 1) {
+-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, mask, 32));
+-        sum +=             __shfl_xor_sync(0xFFFFFFFF, sum,  mask, 32);
++        amax = fmaxf(amax, ggml_cuda_shfl_xor_sync<32>(amax, mask));
++        sum +=             ggml_cuda_shfl_xor_sync<32>(sum,  mask);
+     }
+ 
+     const float d = amax / 127;
+@@ -965,6 +965,13 @@ void launch_fattn(
+             }
+         }
+ 
++        const bool is_amd = !GGML_CUDA_CC_IS_NVIDIA(cc);
++        const bool is_prompt_processing = Q->ne[1] > 1;
++
++        if (is_amd && is_prompt_processing) {
++            parallel_blocks = 1;
++        }
++
+         blocks_num.x = ntiles_x;
+         blocks_num.y = parallel_blocks;
+         blocks_num.z = ntiles_z_gqa*K->ne[2]*Q->ne[3];
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index 721edd99..c32c1ed0 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -1,3 +1,6 @@
++#include <cstdlib>
++#include <cstring>
++
+ #include "common.cuh"
+ #include "fattn-common.cuh"
+ #include "fattn-mma-f16.cuh"
+@@ -6,6 +9,10 @@
+ #include "fattn-wmma-f16.cuh"
+ #include "fattn.cuh"
+ 
++#ifdef GGML_USE_HIP
++#include "gfx906/gfx906-fattn-q8.cuh"
++#endif
++
+ template <int DKQ, int DV, int ncols2>
+ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+@@ -273,6 +280,9 @@ enum best_fattn_kernel {
+     BEST_FATTN_KERNEL_NONE     =   0,
+     BEST_FATTN_KERNEL_TILE     = 200,
+     BEST_FATTN_KERNEL_VEC      = 100,
++#ifdef GGML_USE_HIP
++    BEST_FATTN_KERNEL_TILE_Q8  = 250,
++#endif
+     BEST_FATTN_KERNEL_WMMA_F16 = 300,
+     BEST_FATTN_KERNEL_MMA_F16  = 400,
+ };
+@@ -297,9 +307,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+ 
+     // The effective batch size for the kernel can be increased by gqa_ratio.
+     // The kernel versions without this optimization are also used for ALiBi, if there is no mask, or if the KV cache is not padded,
+-    bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
++    bool gqa_opt_applies = gqa_ratio % 2 == 0 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+     for (const ggml_tensor * t : {Q, K, V, mask}) {
+-        if (t == nullptr || ggml_is_quantized(t->type)) {
++        if (t == nullptr) {
+             continue;
+         }
+         for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+@@ -448,12 +458,32 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+                     return BEST_FATTN_KERNEL_VEC;
+                 }
+             }
+-        } else {
++        }
++#ifndef GGML_USE_HIP
++        else {
+             if (Q->ne[1] <= 2) {
+                 return BEST_FATTN_KERNEL_VEC;
+             }
+         }
++#endif
++    }
++
++#ifdef GGML_USE_HIP
++    if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
++        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
++                                            (K->ne[0] != 40) &&
++                                            (K->ne[0] != 80) &&
++                                            (K->ne[0] != 112);
++
++        if (q8_head_size_supported) {
++            const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
++            if (env_use_dot4 == nullptr || strcmp(env_use_dot4, "0") != 0) {
++                return BEST_FATTN_KERNEL_TILE_Q8;
++            }
++        }
+     }
++#endif
++
+     return BEST_FATTN_KERNEL_TILE;
+ }
+ 
+@@ -465,6 +495,11 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
+         case BEST_FATTN_KERNEL_TILE:
+             ggml_cuda_flash_attn_ext_tile(ctx, dst);
+             break;
++#ifdef GGML_USE_HIP
++        case BEST_FATTN_KERNEL_TILE_Q8:
++            ggml_cuda_flash_attn_ext_tile_q8(ctx, dst);
++            break;
++#endif
+         case BEST_FATTN_KERNEL_VEC:
+             ggml_cuda_flash_attn_ext_vec(ctx, dst);
+             break;
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-common.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-common.cuh
+new file mode 100644
+index 00000000..2008c067
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-common.cuh
+@@ -0,0 +1,179 @@
++#pragma once
++
++// DPP-based warp reductions for GFX906
++// Fuses shuffle + ALU into single DPP instruction, reducing latency
++
++#include "gfx906-config.h"
++
++#ifdef GGML_USE_HIP
++
++#define DEFINE_FUSED_DPP_F32(name, barrier, dpp_ctrl, vop_instr)           \
++    static __device__ __forceinline__ float name(float x) {                \
++        float result;                                                       \
++        asm volatile(                                                       \
++            barrier                                                         \
++            vop_instr " %0, %1, %1 " dpp_ctrl " row_mask:0xf bank_mask:0xf" \
++            : "=v"(result) : "v"(x) : "memory"                             \
++        );                                                                  \
++        return result;                                                      \
++    }
++
++DEFINE_FUSED_DPP_F32(hip_add_xor1_f32, "s_nop 4\n", "quad_perm:[1,0,3,2]", "v_add_f32_dpp")
++DEFINE_FUSED_DPP_F32(hip_max_xor1_f32, "s_nop 4\n", "quad_perm:[1,0,3,2]", "v_max_f32_dpp")
++
++DEFINE_FUSED_DPP_F32(hip_add_xor2_f32, "s_nop 1\n", "quad_perm:[2,3,0,1]", "v_add_f32_dpp")
++DEFINE_FUSED_DPP_F32(hip_max_xor2_f32, "s_nop 1\n", "quad_perm:[2,3,0,1]", "v_max_f32_dpp")
++
++DEFINE_FUSED_DPP_F32(hip_add_xor8_f32, "s_nop 1\n", "row_ror:8", "v_add_f32_dpp")
++DEFINE_FUSED_DPP_F32(hip_max_xor8_f32, "s_nop 1\n", "row_ror:8", "v_max_f32_dpp")
++
++#undef DEFINE_FUSED_DPP_F32
++
++static __device__ __forceinline__ float hip_shuffle_xor4_f32(float x) {
++    int v_src = __float_as_int(x);
++    int v_dst;
++    asm volatile(
++        "v_mov_b32 %0, %1\n"
++        "s_nop 1\n"
++        "v_mov_b32_dpp %0, %1 row_shl:4 row_mask:0xf bank_mask:0x5\n"
++        "v_mov_b32_dpp %0, %1 row_shr:4 row_mask:0xf bank_mask:0xa\n"
++        : "=v"(v_dst) : "v"(v_src) : "memory"
++    );
++    return __int_as_float(v_dst);
++}
++
++static __device__ __forceinline__ float hip_shuffle_xor16_f32(float x) {
++    int int_val = __float_as_int(x);
++    int result;
++    asm volatile(
++        "ds_swizzle_b32 %0, %1 offset:swizzle(SWAP,16)\n"
++        "s_waitcnt lgkmcnt(0)\n"
++        : "=v"(result) : "v"(int_val) : "memory"
++    );
++    return __int_as_float(result);
++}
++
++struct AddOp {
++    static __device__ __forceinline__ float apply(float a, float b) { return a + b; }
++    static __device__ __forceinline__ float xor1(float x) { return hip_add_xor1_f32(x); }
++    static __device__ __forceinline__ float xor2(float x) { return hip_add_xor2_f32(x); }
++    static __device__ __forceinline__ float xor8(float x) { return hip_add_xor8_f32(x); }
++};
++
++struct MaxOp {
++    static __device__ __forceinline__ float apply(float a, float b) { return fmaxf(a, b); }
++    static __device__ __forceinline__ float xor1(float x) { return hip_max_xor1_f32(x); }
++    static __device__ __forceinline__ float xor2(float x) { return hip_max_xor2_f32(x); }
++    static __device__ __forceinline__ float xor8(float x) { return hip_max_xor8_f32(x); }
++};
++
++template<int width = WARP_SIZE, typename Op>
++static __device__ __forceinline__ float warp_reduce_amd_f32(float x) {
++    if (width >= 2)  x = Op::xor1(x);
++    if (width >= 4)  x = Op::xor2(x);
++    if (width >= 8)  x = Op::apply(x, hip_shuffle_xor4_f32(x));
++    if (width >= 16) x = Op::xor8(x);
++    if (width >= 32) x = Op::apply(x, hip_shuffle_xor16_f32(x));
++    if (width == 64) x = Op::apply(x, __shfl_xor(x, 32, 64));
++    return x;
++}
++
++template<typename T>
++static __device__ __forceinline__ T hip_dpp_xor1(T value) {
++    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
++    int int_val = *reinterpret_cast<int*>(&value);
++    int result;
++    asm volatile(
++        "s_nop 4\n"
++        "v_mov_b32_dpp %0, %1 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
++        : "=v"(result) : "v"(int_val) : "memory"
++    );
++    return *reinterpret_cast<T*>(&result);
++}
++
++template<typename T>
++static __device__ __forceinline__ T hip_dpp_xor2(T value) {
++    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
++    int int_val = *reinterpret_cast<int*>(&value);
++    int result;
++    asm volatile(
++        "s_nop 1\n"
++        "v_mov_b32_dpp %0, %1 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf"
++        : "=v"(result) : "v"(int_val) : "memory"
++    );
++    return *reinterpret_cast<T*>(&result);
++}
++
++template<typename T>
++static __device__ __forceinline__ T hip_dpp_xor4(T value) {
++    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
++    int v_src = *reinterpret_cast<int*>(&value);
++    int v_dst;
++    asm volatile(
++        "v_mov_b32 %0, %1\n"
++        "s_nop 1\n"
++        "v_mov_b32_dpp %0, %1 row_shl:4 row_mask:0xf bank_mask:0x5\n"
++        "v_mov_b32_dpp %0, %1 row_shr:4 row_mask:0xf bank_mask:0xa\n"
++        : "=v"(v_dst) : "v"(v_src) : "memory"
++    );
++    return *reinterpret_cast<T*>(&v_dst);
++}
++
++template<typename T>
++static __device__ __forceinline__ T hip_dpp_xor8(T value) {
++    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
++    int int_val = *reinterpret_cast<int*>(&value);
++    int result;
++    asm volatile(
++        "s_nop 1\n"
++        "v_mov_b32_dpp %0, %1 row_ror:8 row_mask:0xf bank_mask:0xf"
++        : "=v"(result) : "v"(int_val) : "memory"
++    );
++    return *reinterpret_cast<T*>(&result);
++}
++
++template<typename T>
++static __device__ __forceinline__ T hip_dpp_xor16(T value) {
++    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
++    int int_val = *reinterpret_cast<int*>(&value);
++    int result;
++    asm volatile(
++        "ds_swizzle_b32 %0, %1 offset:swizzle(SWAP,16)\n"
++        "s_waitcnt lgkmcnt(0)\n"
++        : "=v"(result) : "v"(int_val) : "memory"
++    );
++    return *reinterpret_cast<T*>(&result);
++}
++
++template<int width = WARP_SIZE, typename T>
++static __device__ __forceinline__ T gfx906_shfl_xor_sync(T x, int offset) {
++    switch (~offset) {
++        case ~1:  return hip_dpp_xor1(x);
++        case ~2:  return hip_dpp_xor2(x);
++        case ~4:  return hip_dpp_xor4(x);
++        case ~8:  return hip_dpp_xor8(x);
++        case ~16: return hip_dpp_xor16(x);
++        default:  return __shfl_xor(x, offset, width);
++    }
++}
++
++template<int width = WARP_SIZE>
++static __device__ __forceinline__ float gfx906_warp_reduce_sum_f32(float x) {
++    return warp_reduce_amd_f32<width, AddOp>(x);
++}
++
++template<int width = WARP_SIZE>
++static __device__ __forceinline__ float gfx906_warp_reduce_max_f32(float x) {
++    return warp_reduce_amd_f32<width, MaxOp>(x);
++}
++
++template<int width = WARP_SIZE, typename T>
++static __device__ __forceinline__ T gfx906_warp_reduce_sum_generic(T x) {
++    #pragma unroll
++    for (int offset = width/2; offset > 0; offset >>= 1) {
++        x += gfx906_shfl_xor_sync<width>(x, offset);
++    }
++    return x;
++}
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-config.h b/ggml/src/ggml-cuda/gfx906/gfx906-config.h
+new file mode 100644
+index 00000000..c20be3cd
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-config.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++// GFX906 (Vega 20 / MI50) kernel configuration
++
++#ifdef GGML_USE_HIP
++
++#define GFX906_FATTN_SPLIT_K_ENABLED 0
++
++#if GFX906_FATTN_SPLIT_K_ENABLED
++    #define GFX906_FATTN_N_SPLIT_MAX 8
++#else
++    #define GFX906_FATTN_N_SPLIT_MAX 1
++#endif
++
++#define GFX906_MMQ_ITER_K 256
++#define GFX906_MMQ_NWARPS 2
++
++#define GFX906_FATTN_Q8_ENABLED 1
++#define GFX906_Q8_SUPPORTS_HEAD_DIM(d) \
++    ((d) % 32 == 0 && (d) != 40 && (d) != 80 && (d) != 112)
++
++#define GFX906_USE_DPP_REDUCTIONS 1
++#define GFX906_FATTN_TILE_SIZE_DEFAULT 128
++#define GFX906_Q8_SCALE_HOISTING 1
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cu b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cu
+new file mode 100644
+index 00000000..49c61d46
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cu
+@@ -0,0 +1,34 @@
++// Q8 Flash Attention dispatch: head sizes 64, 96, 128, 256, 576
++
++#include "../common.cuh"
++#include "gfx906-fattn-q8.cuh"
++
++void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * K = dst->src[1];
++    const ggml_tensor * V = dst->src[2];
++    switch (K->ne[0]) {
++        case  64: {
++            GGML_ASSERT(V->ne[0] == K->ne[0]);
++            ggml_cuda_flash_attn_ext_tile_q8_case< 64,  64>(ctx, dst);
++        } break;
++        case  96: {
++            GGML_ASSERT(V->ne[0] == K->ne[0]);
++            ggml_cuda_flash_attn_ext_tile_q8_case< 96,  96>(ctx, dst);
++        } break;
++        case 128: {
++            GGML_ASSERT(V->ne[0] == K->ne[0]);
++            ggml_cuda_flash_attn_ext_tile_q8_case<128, 128>(ctx, dst);
++        } break;
++        case 256: {
++            GGML_ASSERT(V->ne[0] == K->ne[0]);
++            ggml_cuda_flash_attn_ext_tile_q8_case<256, 256>(ctx, dst);
++        } break;
++        case 576: {
++            GGML_ASSERT(V->ne[0] == 512);
++            ggml_cuda_flash_attn_ext_tile_q8_case<576, 512>(ctx, dst);
++        } break;
++        default: {
++            GGML_ABORT("Unsupported head size for Q8 tile kernel");
++        } break;
++    }
++}
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+new file mode 100644
+index 00000000..87ea3d3a
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-fattn-q8.cuh
+@@ -0,0 +1,981 @@
++// Flash Attention with Q8_0 quantized KV cache for GFX906
++// Uses v_dot4_i32_i8 for INT8 dot products, +16 LDS padding to avoid bank conflicts
++
++#include "../common.cuh"
++#include "../fattn-common.cuh"
++#include "../cpy-utils.cuh"
++
++#include "gfx906-config.h"
++#include "gfx906-common.cuh"
++
++#define GGML_CUDA_FATTN_TILE_CONFIG_CASE(DKQ_, DV_, ncols_, nthreads, occupancy, nbatch_fa, nbatch_K) \
++    if (DKQ == (DKQ_) && DV == (DV_) && ncols == (ncols_)) {                                          \
++        static_assert((nthreads)          <= 512, "bad nthreads");                                    \
++        static_assert((occupancy)         <=   8, "bad occupancy");                                   \
++        static_assert((nbatch_fa)         <= 256, "bad nbatch_fa");                                   \
++        static_assert((nbatch_K)          <= 256, "bad nbatch_K");                                    \
++        return ((nthreads) << 0) | ((occupancy) << 10) | ((nbatch_fa) << 14) | ((nbatch_K) << 23);    \
++    }
++
++static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_q8_get_config_amd(const int DKQ, const int DV, const int ncols) {
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  2,  64, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  4, 128, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40,  8, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40, 16, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40, 32, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 40,  40, 64, 256, 2,  32,  40)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  2,  64, 2,  32,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  4, 128, 2,  64,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64,  8, 128, 2,  32,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 16, 256, 1, 128,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 32, 256, 2,  64,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 64,  64, 64, 256, 2,  64,  64)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80,  2,  64, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80,  4, 128, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80,  8, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80, 16, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80, 32, 256, 2,  32,  40)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 80,  80, 64, 256, 2,  32,  40)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96,  2,  64, 2,  32,  48)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96,  4, 128, 2,  32,  48)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96,  8, 256, 2,  32,  48)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96, 16, 256, 2,  32,  48)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96, 32, 256, 2,  32,  48)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE( 96,  96, 64, 256, 2,  32,  48)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112,  2,  64, 2,  32,  56)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112,  4, 128, 2,  32,  56)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112,  8, 256, 2,  32,  56)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112, 16, 256, 2,  32,  56)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112, 32, 256, 2,  32,  56)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(112, 112, 64, 256, 2,  32,  56)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  2, 256, 2, 128,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  4, 128, 1,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128,  8, 256, 2,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128, 16, 256, 2,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128, 32, 256, 2,  64,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(128, 128, 64, 256, 2,  64,  64)
++
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  2, 256, 2, 128,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  4, 256, 2,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256,  8, 256, 2,  64, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 16, 256, 2,  32, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 32, 256, 2,  32, 128)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(576, 512, 16, 256, 2,  64,  64)
++    GGML_CUDA_FATTN_TILE_CONFIG_CASE(576, 512, 32, 512, 1, 128,  64)
++
++    return 0;
++}
++
++static __host__ uint32_t ggml_cuda_fattn_tile_q8_get_config(const int DKQ, const int DV, const int ncols, const int cc) {
++    return ggml_cuda_fattn_tile_q8_get_config_amd(DKQ, DV, ncols);
++}
++
++static constexpr __device__ uint32_t ggml_cuda_fattn_tile_q8_get_config(const int DKQ, const int DV, const int ncols) {
++    return ggml_cuda_fattn_tile_q8_get_config_amd(DKQ, DV, ncols);
++}
++
++static __host__ int ggml_cuda_fattn_tile_q8_get_nthreads(const int DKQ, const int DV, const int ncols, const int cc) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols, cc) >> 0) & ((1 << 10) - 1);
++}
++
++static constexpr __device__ int ggml_cuda_fattn_tile_q8_get_nthreads(const int DKQ, const int DV, const int ncols) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols) >> 0) & ((1 << 10) - 1);
++}
++
++static __host__ int ggml_cuda_fattn_tile_q8_get_occupancy(const int DKQ, const int DV, const int ncols, const int cc) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols, cc) >> 10) & ((1 << 4) - 1);
++}
++
++static constexpr __device__ int ggml_cuda_fattn_tile_q8_get_occupancy(const int DKQ, const int DV, const int ncols) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols) >> 10) & ((1 << 4) - 1);
++}
++
++static __host__ int ggml_cuda_fattn_tile_q8_get_nbatch_fa(const int DKQ, const int DV, const int ncols, const int cc) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols, cc) >> 14) & ((1 << 9) - 1);
++}
++
++static constexpr __device__ int ggml_cuda_fattn_tile_q8_get_nbatch_fa(const int DKQ, const int DV, const int ncols) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols) >> 14) & ((1 << 9) - 1);
++}
++
++static __host__ int ggml_cuda_fattn_tile_q8_get_nbatch_K(const int DKQ, const int DV, const int ncols, const int cc) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols, cc) >> 23) & ((1 << 9) - 1);
++}
++
++static constexpr __device__ int ggml_cuda_fattn_tile_q8_get_nbatch_K(const int DKQ, const int DV, const int ncols) {
++    return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols) >> 23) & ((1 << 9) - 1);
++}
++
++template<int warp_size, int nwarps, int I, int J, int J_padding, bool oob_check>
++static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile(
++        const half2 * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int stride_KV, const int i_sup) {
++    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
++    constexpr int cpy_ne = cpy_nb / 4;
++
++    auto load = [&] __device__ (const int n) {
++        const int stride_j = warp_size >> n;
++
++        if (stride_j == 0) {
++            return;
++        }
++
++        const int j0_start = stride_j == warp_size ? 0 : ((J/2)/cpy_ne) - ((J/2)/cpy_ne) % (2*stride_j);
++        const int j0_stop  =                             ((J/2)/cpy_ne) - ((J/2)/cpy_ne) % (1*stride_j);
++        const int stride_i = warp_size / stride_j;
++
++        if (j0_start == j0_stop) {
++            return;
++        }
++
++#pragma unroll
++        for (int i0 = 0; i0 < I; i0 += nwarps*stride_i) {
++            const int i = i0 + threadIdx.y*stride_i + (stride_j == warp_size ? 0 : threadIdx.x / stride_j);
++
++            if (i0 + nwarps*stride_i <= I || i < I) {
++#pragma unroll
++                for (int j0 = j0_start; j0 < j0_stop; j0 += stride_j) {
++                    const int j = j0*cpy_ne + (stride_j == warp_size ? threadIdx.x : threadIdx.x % stride_j)*cpy_ne;
++
++                    const half2 zero[cpy_ne] = {{0.0f, 0.0f}};
++                    ggml_cuda_memcpy_1<cpy_nb>(
++                        tile_KV + i*(J/2 + J_padding) + j,
++                        !oob_check || i < i_sup ? KV + i*stride_KV + j : zero);
++                }
++            }
++        }
++    };
++
++    static_assert(J % 8 == 0, "bad J");
++    static_assert((J/2) % cpy_ne == 0, "bad J");
++    ggml_cuda_unroll<7>{}(load);
++}
++
++template<int warp_size, int nwarps, int I, int J, int K_row_stride, int J_padding, bool oob_check>
++static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
++        const block_q8_0 * const __restrict__ K_q8,
++        int8_t * const __restrict__ K_values,
++        half * const __restrict__ K_scales,
++        const int stride_K_q8,
++        const int i_sup) {
++
++    if constexpr (J > 0) {
++        constexpr int blocks_per_row = J / 32;
++        const int tid = threadIdx.y * blockDim.x + threadIdx.x;
++        const int total_blocks = I * blocks_per_row;
++
++        for (int block_idx = tid; block_idx < total_blocks; block_idx += blockDim.x * blockDim.y) {
++            const int row = block_idx / blocks_per_row;
++            const int col_block = block_idx % blocks_per_row;
++
++            if (oob_check && row >= i_sup) {
++                break;
++            }
++
++            const int global_block_idx = row * stride_K_q8 + col_block;
++            const block_q8_0 src_block = K_q8[global_block_idx];
++
++            K_scales[col_block * I + row] = src_block.d;
++
++            int8_t * dst = K_values + row * K_row_stride + col_block * 32;
++            const int4* src_int4 = (const int4*)src_block.qs;
++            int4* dst_int4 = (int4*)dst;
++
++            dst_int4[0] = src_int4[0];
++            dst_int4[1] = src_int4[1];
++        }
++
++        __syncthreads();
++    }
++}
++
++template<int nthreads, int ncols, int ncols2, int DKQ, int DKQp, int cpw, int np, int cpy_ne>
++static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
++        const float * __restrict__ Q_f,
++        int8_t * __restrict__ Q_values,
++        half * __restrict__ Q_scales,
++        half * __restrict__ Q_sums,
++        const int col_Q_0,
++        const int ne01,
++        const int32_t nb01,
++        const int32_t nb02,
++        const float scale) {
++
++    constexpr int blocks_per_col = DKQ / QK8_0;
++    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
++    const int total_blocks = ncols * blocks_per_col;
++
++    for (int block_idx = tid; block_idx < total_blocks; block_idx += blockDim.x * blockDim.y) {
++        const int col = block_idx / blocks_per_col;
++        const int col_block = block_idx % blocks_per_col;
++        const int block_start = col_block * QK8_0;
++
++        const int jc = col;
++        const int j = jc / ncols2;
++        const int c = jc % ncols2;
++
++        if (ncols != 1 && col_Q_0 + j >= ne01) {
++            continue;
++        }
++
++        float Q_vals[QK8_0];
++        block_q8_0 Q_block;
++
++        const int base_offset = c*(nb02/sizeof(float)) + j*(nb01/sizeof(float)) + block_start;
++
++        #pragma unroll
++        for (int i = 0; i < QK8_0; i++) {
++            if (block_start + i < DKQ) {
++                Q_vals[i] = Q_f[base_offset + i] * scale;
++            } else {
++                Q_vals[i] = 0.0f;
++            }
++        }
++
++        quantize_f32_q8_0_block(Q_vals, &Q_block);
++
++        Q_scales[col_block * ncols + jc] = Q_block.d;
++
++        int block_sum = 0;
++        #pragma unroll
++        for (int i = 0; i < QK8_0; i++) {
++            block_sum += Q_block.qs[i];
++        }
++        Q_sums[col_block * ncols + jc] = __int2half_rn(block_sum);
++
++        int8_t * dst = Q_values + jc * DKQ + col_block * 32;
++        const int4* src_int4 = (const int4*)Q_block.qs;
++        int4* dst_int4 = (int4*)dst;
++
++        dst_int4[0] = src_int4[0];
++        dst_int4[1] = src_int4[1];
++    }
++
++    __syncthreads();
++}
++
++template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int nbatch_fa, int nbatch_K,
++    bool use_logit_softcap, bool oob_check>
++static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
++        int8_t * const Q_values,
++        half * const Q_scales,
++        half * const Q_sums,
++        const block_q8_0 * const __restrict__ K_q8,
++        int8_t * const K_values,
++        half * const K_scales,
++        const int stride_K_q8,
++        const int k_VKQ_0,
++        const int k_VKQ_sup,
++        const int k_KQ_0,
++        float * KQ_acc) {
++    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
++    constexpr int cpy_ne = cpy_nb / 4;
++
++    constexpr int ncols = ncols1*ncols2;
++    constexpr int cpw   = ncols > nwarps ? ncols/nwarps : 1;
++    constexpr int np    = nwarps > ncols ? nwarps/ncols : 1;
++
++    constexpr int K_row_stride = nbatch_K + 16;
++
++    flash_attn_tile_q8_q8_load_tile_q8<warp_size, nwarps, nbatch_fa, nbatch_K, K_row_stride, cpy_ne, oob_check>
++        (K_q8 + int64_t(k_VKQ_0)*stride_K_q8 + (k_KQ_0/32), K_values, K_scales, stride_K_q8, k_VKQ_sup);
++    __syncthreads();
++
++    static_assert(nbatch_K % 4 == 0, "nbatch_K must be multiple of 4 for sdot4");
++
++    constexpr int blocks_per_K_row = nbatch_K / 32;
++    constexpr int blocks_per_Q_col = DKQ / 32;
++
++    #pragma unroll 4
++    for (int jc0 = 0; jc0 < cpw; ++jc0) {
++        const int jc = jc0 + (threadIdx.y / np)*cpw;
++
++        half q_scales_hoisted[blocks_per_K_row];
++        #pragma unroll
++        for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
++            q_scales_hoisted[block_id] = Q_scales[((k_KQ_0/32) + block_id) * ncols + jc];
++        }
++
++        #pragma unroll 4
++        for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
++            const int i_KQ = i_KQ_0 + (threadIdx.y % np)*warp_size + threadIdx.x;
++            const int idx = i_KQ_0/(np*warp_size)*cpw + jc0;
++
++            const int8_t* K_row_base = K_values + i_KQ * K_row_stride;
++
++            #pragma unroll 2
++            for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
++                const int4* K_ptr4 = (const int4*)(K_row_base + block_id * 32);
++                const int4* Q_ptr4 = (const int4*)&Q_values[jc * DKQ + k_KQ_0 + block_id * 32];
++
++                const int4 K_lo = K_ptr4[0];
++                const int4 K_hi = K_ptr4[1];
++                const int4 Q_lo = Q_ptr4[0];
++                const int4 Q_hi = Q_ptr4[1];
++
++                int acc_int = 0;
++                acc_int = ggml_cuda_dp4a(K_lo.x, Q_lo.x, acc_int);
++                acc_int = ggml_cuda_dp4a(K_lo.y, Q_lo.y, acc_int);
++                acc_int = ggml_cuda_dp4a(K_lo.z, Q_lo.z, acc_int);
++                acc_int = ggml_cuda_dp4a(K_lo.w, Q_lo.w, acc_int);
++                acc_int = ggml_cuda_dp4a(K_hi.x, Q_hi.x, acc_int);
++                acc_int = ggml_cuda_dp4a(K_hi.y, Q_hi.y, acc_int);
++                acc_int = ggml_cuda_dp4a(K_hi.z, Q_hi.z, acc_int);
++                acc_int = ggml_cuda_dp4a(K_hi.w, Q_hi.w, acc_int);
++
++                const half k_scale_h = K_scales[block_id * nbatch_fa + i_KQ];
++                const half combined_scale_h = __hmul(k_scale_h, q_scales_hoisted[block_id]);
++
++                KQ_acc[idx] += __half2float(combined_scale_h) * (float)acc_int;
++            }
++        }
++    }
++
++    if (k_KQ_0 + nbatch_K < DKQ) {
++        __syncthreads();
++    }
++}
++
++template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int DV, int nbatch_fa, int nbatch_K,
++    bool use_logit_softcap, bool oob_check, typename T_KQ, typename T_acc>
++static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
++        int8_t * const Q_values,
++        half * const Q_scales,
++        half * const Q_sums,
++        const block_q8_0 * const __restrict__ K_q8,
++        const half2 * const __restrict__ V_h2,
++        const half  * const __restrict__ mask,
++        const float logit_softcap,
++        const float slope,
++        T_KQ      * const KQ,
++        int8_t * const K_values,
++        half * const K_scales,
++        half2 * const V_tmp,
++        const int stride_K_q8,
++        const int stride_V2,
++        const int stride_mask,
++        float * const KQ_max,
++        float * const KQ_sum,
++        T_acc * const VKQ,
++        const int k_VKQ_0,
++        const int k_VKQ_max) {
++    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
++    constexpr int cpy_ne = cpy_nb / 4;
++
++    constexpr int ncols = ncols1*ncols2;
++    constexpr int cpw   = ncols > nwarps ? ncols/nwarps : 1;
++    constexpr int np    = nwarps > ncols ? nwarps/ncols : 1;
++
++    constexpr int DVp = (DV + 2*warp_size - 1) & ~(2*warp_size - 1);
++
++    constexpr int KQ_cs = cpw < 2*cpy_ne ? cpw : 2*cpy_ne;
++    static_assert(cpw % KQ_cs == 0, "bad KQ_cs");
++    const int k_VKQ_sup = k_VKQ_max - k_VKQ_0;
++
++    float KQ_max_new[cpw];
++#pragma unroll
++    for (int jc0 = 0; jc0 < cpw; ++jc0) {
++        KQ_max_new[jc0] = KQ_max[jc0];
++    }
++
++    constexpr int num_i_KQ_iters = nbatch_fa/(np*warp_size);
++    float KQ_acc[num_i_KQ_iters * cpw] = {0.0f};
++
++    constexpr int nbatch_K_last = DKQ % nbatch_K;
++    constexpr int num_K_tiles = (DKQ - nbatch_K_last) / nbatch_K;
++
++    #pragma unroll
++    for (int tile = 0; tile < num_K_tiles; tile++) {
++        const int k_KQ_0 = tile * nbatch_K;
++        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>(
++            Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
++    }
++
++    if constexpr (nbatch_K_last > 0) {
++        constexpr int k_KQ_0 = DKQ - nbatch_K_last;
++        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, use_logit_softcap, oob_check>(
++            Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
++    }
++
++    if constexpr (num_i_KQ_iters == 1) {
++        const int i_KQ = (threadIdx.y % np)*warp_size + threadIdx.x;
++
++#pragma unroll
++        for (int jc0 = 0; jc0 < cpw; ++jc0) {
++            const int j = (jc0 + (threadIdx.y / np)*cpw)/ncols2;
++
++            if (use_logit_softcap) {
++                KQ_acc[jc0] = logit_softcap * tanhf(KQ_acc[jc0]);
++            }
++
++            if (!oob_check || i_KQ < k_VKQ_sup) {
++                KQ_acc[jc0] += (ncols2 > 1 || mask) ?
++                    slope*__half2float(mask[j*stride_mask + k_VKQ_0 + i_KQ]) : 0.0f;
++
++                KQ_max_new[jc0] = fmaxf(KQ_max_new[jc0], KQ_acc[jc0]);
++            }
++
++            KQ_max_new[jc0] = warp_reduce_max<warp_size>(KQ_max_new[jc0]);
++        }
++    } else {
++#pragma unroll
++        for (int jc0 = 0; jc0 < cpw; ++jc0) {
++            const int j = (jc0 + (threadIdx.y / np)*cpw)/ncols2;
++
++#pragma unroll
++            for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
++                const int i_KQ = i_KQ_0 + (threadIdx.y % np)*warp_size + threadIdx.x;
++
++                if (use_logit_softcap) {
++                    KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] = logit_softcap * tanhf(KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0]);
++                }
++
++                if (!oob_check || i_KQ < k_VKQ_sup) {
++                    KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] += (ncols2 > 1 || mask) ?
++                        slope*__half2float(mask[j*stride_mask + k_VKQ_0 + i_KQ]) : 0.0f;
++
++                    KQ_max_new[jc0] = fmaxf(KQ_max_new[jc0], KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0]);
++                }
++            }
++
++            KQ_max_new[jc0] = warp_reduce_max<warp_size>(KQ_max_new[jc0]);
++        }
++    }
++
++    if constexpr (np == 1) {
++        __syncthreads();
++    } else {
++        static_assert(cpw == 1, "bad cpw");
++        __shared__ float KQ_max_new_shared[nwarps];
++        if (threadIdx.x == 0) {
++            KQ_max_new_shared[threadIdx.y] = KQ_max_new[0];
++        }
++        __syncthreads();
++        KQ_max_new[0] = KQ_max_new_shared[(threadIdx.y & ~(np-1)) + threadIdx.x % np];
++        KQ_max_new[0] = warp_reduce_max<np>(KQ_max_new[0]);
++    }
++
++    if constexpr (num_i_KQ_iters == 1) {
++        const int i_KQ = (threadIdx.y % np)*warp_size + threadIdx.x;
++
++#pragma unroll
++        for (int jc0 = 0; jc0 < cpw; jc0 += KQ_cs) {
++            half tmp[1][KQ_cs];
++
++#pragma unroll
++            for (int jc1 = 0; jc1 < KQ_cs; ++jc1) {
++                const int jc = jc0 + jc1;
++
++                const float KQ_max_scale = expf(KQ_max[jc] - KQ_max_new[jc]);
++                KQ_max[jc] = KQ_max_new[jc];
++
++                const float val = !oob_check || i_KQ < k_VKQ_sup ?
++                    expf(KQ_acc[jc] - KQ_max[jc]) : 0.0f;
++                const float KQ_sum_add = val;
++                tmp[0][jc1] = val;
++
++                KQ_sum[jc] = KQ_sum[jc]*KQ_max_scale + KQ_sum_add;
++
++                const half2 KQ_max_scale_h2 = make_half2(KQ_max_scale, KQ_max_scale);
++#pragma unroll
++                for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
++                    VKQ[jc*((DVp/2)/warp_size) + i0/warp_size] *= KQ_max_scale_h2;
++                }
++            }
++
++            ggml_cuda_memcpy_1<sizeof(tmp[0])>(
++                KQ + (jc0/KQ_cs + (threadIdx.y / np)*(cpw/KQ_cs))*(nbatch_fa*KQ_cs) + i_KQ*KQ_cs,
++                tmp[0]);
++        }
++    } else {
++#pragma unroll
++        for (int jc0 = 0; jc0 < cpw; jc0 += KQ_cs) {
++            half tmp[num_i_KQ_iters][KQ_cs];
++
++#pragma unroll
++            for (int jc1 = 0; jc1 < KQ_cs; ++jc1) {
++                const int jc = jc0 + jc1;
++
++                const float KQ_max_scale = expf(KQ_max[jc] - KQ_max_new[jc]);
++                KQ_max[jc] = KQ_max_new[jc];
++
++                float KQ_sum_add = 0.0f;
++#pragma unroll
++                for (int i0 = 0; i0 < nbatch_fa; i0 += np*warp_size) {
++                    const float val = !oob_check || i0 + (threadIdx.y % np)*warp_size + threadIdx.x < k_VKQ_sup ?
++                        expf(KQ_acc[(i0/(np*warp_size))*cpw + jc] - KQ_max[jc]) : 0.0f;
++                    KQ_sum_add += val;
++                    tmp[i0/(np*warp_size)][jc1] = val;
++                }
++                KQ_sum[jc] = KQ_sum[jc]*KQ_max_scale + KQ_sum_add;
++
++                const half2 KQ_max_scale_h2 = make_half2(KQ_max_scale, KQ_max_scale);
++#pragma unroll
++                for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
++                    VKQ[jc*((DVp/2)/warp_size) + i0/warp_size] *= KQ_max_scale_h2;
++                }
++            }
++
++#pragma unroll
++            for (int i0 = 0; i0 < nbatch_fa; i0 += np*warp_size) {
++                const int i = i0 + (threadIdx.y % np)*warp_size + threadIdx.x;
++
++                ggml_cuda_memcpy_1<sizeof(tmp[0])>(
++                    KQ + (jc0/KQ_cs + (threadIdx.y / np)*(cpw/KQ_cs))*(nbatch_fa*KQ_cs) + i*KQ_cs,
++                    tmp[i0/(np*warp_size)]);
++            }
++        }
++    }
++
++    static_assert(DV <= DKQ, "bad DV");
++    static_assert(DV % nbatch_K == 0 || (nbatch_K % 3 == 0 && DV % (nbatch_K*2/3) == 0), "bad nbatch_K");
++    constexpr int nbatch_V = (DV % nbatch_K == 0 ? nbatch_K : nbatch_K*2/3) * nbatch_fa / DV;
++    static_assert(nbatch_fa % nbatch_V == 0, "bad nbatch_V");
++    static_assert(nbatch_V % np == 0, "bad nbatch_V");
++#pragma unroll
++    for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
++        flash_attn_tile_q8_q8_load_tile<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
++            (V_h2 + int64_t(k_VKQ_0 + k0)*stride_V2, V_tmp, stride_V2, k_VKQ_sup - k0);
++        __syncthreads();
++
++#pragma unroll
++        for (int k1 = 0; k1 < nbatch_V; k1 += np) {
++            half2 V_k[(DVp/2)/warp_size];
++            half2 KQ_k[cpw];
++
++            constexpr int cpy_ne_D = cpy_ne/2 < (DVp/2)/warp_size ? cpy_ne/2 : (DVp/2)/warp_size;
++#pragma unroll
++            for (int i0 = 0; i0 < DVp/2; i0 += warp_size*cpy_ne_D) {
++                ggml_cuda_memcpy_1<cpy_ne_D*4>(&V_k[i0/warp_size], &V_tmp[(k1 + threadIdx.y % np)*(DV/2) + i0 + threadIdx.x*cpy_ne_D]);
++            }
++#pragma unroll
++            for (int jc_VKQ_0 = 0; jc_VKQ_0 < cpw; jc_VKQ_0 += KQ_cs) {
++                const int jc_KQ = jc_VKQ_0/KQ_cs + (threadIdx.y / np)*(cpw/KQ_cs);
++
++                half tmp[KQ_cs];
++                ggml_cuda_memcpy_1<KQ_cs*sizeof(half)>(
++                    &tmp, KQ + jc_KQ*(nbatch_fa*KQ_cs) + (k0 + k1 + threadIdx.y % np)*KQ_cs);
++#pragma unroll
++                for (int jc_VKQ_1 = 0; jc_VKQ_1 < KQ_cs; ++jc_VKQ_1) {
++                    KQ_k[jc_VKQ_0+jc_VKQ_1] = __half2half2(tmp[jc_VKQ_1]);
++                }
++            }
++
++#pragma unroll
++            for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
++#pragma unroll
++                for (int jc_VKQ_0 = 0; jc_VKQ_0 < cpw; ++jc_VKQ_0) {
++                    VKQ[jc_VKQ_0*((DVp/2)/warp_size) + i0/warp_size] += V_k[i0/warp_size]*KQ_k[jc_VKQ_0];
++                }
++            }
++        }
++
++        __syncthreads();
++    }
++}
++
++template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap>
++__launch_bounds__(ggml_cuda_fattn_tile_q8_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_tile_q8_get_occupancy(DKQ, DV, ncols1*ncols2))
++static __global__ void flash_attn_tile_q8(
++        const char * __restrict__ Q,
++        const char * __restrict__ K,
++        const char * __restrict__ V,
++        const char * __restrict__ mask,
++        const char * __restrict__ sinks,
++        const int  * __restrict__ KV_max,
++        float      * __restrict__ dst,
++        float2     * __restrict__ dst_meta,
++        const float scale,
++        const float max_bias,
++        const float m0,
++        const float m1,
++        const uint32_t n_head_log2,
++        const float logit_softcap,
++        const int32_t ne00, const uint3   ne01, const int32_t ne02, const int32_t ne03,
++                            const int32_t nb01, const int32_t nb02, const int32_t nb03,
++        const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
++                            const int32_t nb11, const int32_t nb12, const int64_t nb13,
++                            const int32_t nb21, const int32_t nb22, const int64_t nb23,
++                            const int32_t ne31, const int32_t ne32, const int32_t ne33,
++                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
++#ifdef FLASH_ATTN_AVAILABLE
++
++    if (use_logit_softcap && !(DV == 128 || DV == 256)) {
++        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
++            max_bias, m0, m1, n_head_log2, logit_softcap,
++            ne00, ne01, ne02, ne03,
++                  nb01, nb02, nb03,
++            ne10, ne11, ne12, ne13,
++                  nb11, nb12, nb13,
++                  nb21, nb22, nb23,
++                  ne31, ne32, ne33,
++                  nb31, nb32, nb33);
++        NO_DEVICE_CODE;
++        return;
++    }
++
++    static_assert(ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols1*ncols2) != 0, "kernel config not defined");
++    static_assert(DKQ % 32 == 0, "DKQ must be multiple of 32 for Q8_0 quantization");
++
++    constexpr int ncols     = ncols1*ncols2;
++    constexpr int warp_size = 32;
++    constexpr int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, ncols1*ncols2) / warp_size;
++    constexpr int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, ncols1*ncols2);
++    constexpr int nbatch_K  = ggml_cuda_fattn_tile_q8_get_nbatch_K (DKQ, DV, ncols1*ncols2);
++
++    const int col_Q_0 = blockIdx.x * ncols1;
++
++    const int sequence = blockIdx.z / (ne02/ncols2);
++    const int head0 = blockIdx.z*ncols2 - sequence*ne02;
++    const int gqa_ratio = ne02 / ne12;
++    const float * Q_f  = (const float *) (Q + nb03*sequence + nb02* head0              + nb01*col_Q_0);
++    const block_q8_0 * K_q8 = (const block_q8_0 *) (K + nb13*sequence + nb12*(head0 / gqa_ratio));
++    const half2 * V_h2 = (const half2 *) (V + nb23*sequence + nb22*(head0 / gqa_ratio));
++
++    const half * maskh = mask ? (const half *) (mask + nb33*(sequence % ne33) + nb31*col_Q_0) : nullptr;
++
++    const int stride_K_q8 = nb11 / sizeof(block_q8_0);
++    const int stride_V2   = nb21 / sizeof(half2);
++    const int stride_mask = nb31 / sizeof(half);
++
++    const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, head0, n_head_log2, m0, m1) : 1.0f;
++
++    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
++    constexpr int cpy_ne = cpy_nb / 4;
++
++    constexpr int cpw = ncols > nwarps ? ncols/nwarps : 1;
++    constexpr int np  = nwarps > ncols ? nwarps/ncols : 1;
++    static_assert(cpw == 1 || np == 1, "bad cpw / np");
++    static_assert(nbatch_fa % (np*warp_size) == 0, "nbatch_fa % (np*warp_size) != 0");
++
++    constexpr int DKQp = (DKQ + 2*warp_size - 1) & ~(2*warp_size - 1);
++    constexpr int DVp  = (DV  + 2*warp_size - 1) & ~(2*warp_size - 1);
++
++    __shared__ int8_t Q_values[ncols * DKQ];
++    __shared__ half   Q_scales[ncols * (DKQ/32)];
++
++    constexpr int blocks_per_Q_col = DKQ / QK8_0;
++    __shared__ half   Q_sums[ncols * blocks_per_Q_col];
++
++    constexpr int K_row_padding = 16;
++    __shared__ int8_t K_values[nbatch_fa * (nbatch_K + K_row_padding)];
++    __shared__ half   K_scales[nbatch_fa * (nbatch_K/32)];
++
++    __shared__ half2 KV_tmp[nbatch_fa * (nbatch_K/2 + cpy_ne) + DVp-DV];
++
++    __shared__ half  KQ[ncols * nbatch_fa];
++    half2 VKQ[cpw * ((DVp/2)/warp_size)] = {{0.0f, 0.0f}};
++
++    float KQ_max[cpw];
++#pragma unroll
++    for (int j0 = 0; j0 < ncols; j0 += nwarps) {
++        KQ_max[j0/nwarps] = -FLT_MAX/2.0f;
++    }
++    float KQ_sum[cpw] = {0.0f};
++
++    flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ, DKQp, cpw, np, cpy_ne>(
++        Q_f, Q_values, Q_scales, Q_sums, col_Q_0, int(ne01.z), nb01, nb02, scale);
++
++    const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
++    if (ncols2 == 1) {
++        int k_VKQ_0 = blockIdx.y*nbatch_fa;
++        while (k_VKQ_0 < k_VKQ_max - nbatch_fa) {
++            constexpr bool oob_check = false;
++            flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
++                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
++                stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
++            k_VKQ_0 += gridDim.y*nbatch_fa;
++        }
++        if (k_VKQ_0 < k_VKQ_max) {
++            constexpr bool oob_check = true;
++            flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
++                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
++                stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
++        }
++    } else {
++        for (int k_VKQ_0 = blockIdx.y*nbatch_fa; k_VKQ_0 < k_VKQ_max; k_VKQ_0 += gridDim.y*nbatch_fa) {
++            constexpr bool oob_check = false;
++            flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
++                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
++                stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
++        }
++    }
++
++#pragma unroll
++    for (int jc0 = 0; jc0 < cpw; ++jc0) {
++        KQ_sum[jc0] = warp_reduce_sum<warp_size>(KQ_sum[jc0]);
++    }
++
++    if constexpr (np > 1) {
++        static_assert(cpw == 1, "bad cpw");
++        static_assert(nbatch_fa*nbatch_K >= nwarps*DVp, "KV_tmp too small");
++
++        half2 * VKQ_combine    = (half2 *) KV_tmp;
++        float * KQ_sum_combine = (float *) Q_values;
++
++        if (threadIdx.y % np != 0) {
++            constexpr int cpy_ne_D = cpy_ne < (DVp/2)/warp_size ? cpy_ne : (DVp/2)/warp_size;
++#pragma unroll
++            for (int i0 = 0; i0 < DVp/2; i0 += warp_size*cpy_ne_D) {
++                ggml_cuda_memcpy_1<cpy_ne_D*4>(&VKQ_combine[threadIdx.y*(DVp/2) + i0 + threadIdx.x*cpy_ne_D], &VKQ[i0/warp_size]);
++            }
++
++            if (threadIdx.x == 0) {
++                KQ_sum_combine[threadIdx.y] = KQ_sum[0];
++            }
++
++            return;
++        }
++
++        __syncthreads();
++
++#pragma unroll
++        for (int ip = 1; ip < np; ++ip) {
++            constexpr int cpy_ne_D = cpy_ne < (DVp/2)/warp_size ? cpy_ne : (DVp/2)/warp_size;
++#pragma unroll
++            for (int i0 = 0; i0 < DVp/2; i0 += warp_size*cpy_ne_D) {
++                half2 tmp[cpy_ne_D];
++                ggml_cuda_memcpy_1<cpy_ne_D*4>(tmp, &VKQ_combine[(threadIdx.y + ip)*(DVp/2) + i0 + threadIdx.x*cpy_ne_D]);
++#pragma unroll
++                for (int i1 = 0; i1 < cpy_ne_D; ++i1) {
++                    VKQ[i0/warp_size + i1] += tmp[i1];
++                }
++            }
++
++            KQ_sum[0] += KQ_sum_combine[threadIdx.y + ip];
++        }
++    }
++
++    if (sinks && blockIdx.y == 0) {
++#pragma unroll
++        for (int jc0 = 0; jc0 < cpw; ++jc0) {
++            const int jc = jc0 + (threadIdx.y/np)*cpw;
++            const float sink = ((const float *) sinks)[head0 + jc % ncols2];
++
++            float KQ_max_new_j = fmaxf(KQ_max[jc0], sink);
++            const float KQ_max_scale = expf(KQ_max[jc0] - KQ_max_new_j);
++            KQ_max[jc0] = KQ_max_new_j;
++
++            const float val = expf(sink - KQ_max[jc0]);
++            KQ_sum[jc0] = KQ_sum[jc0]*KQ_max_scale + val;
++
++            const half2 KQ_max_scale_h2 = make_half2(KQ_max_scale, KQ_max_scale);
++#pragma unroll
++            for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
++                VKQ[jc0*((DVp/2)/warp_size) + i0/warp_size] *= KQ_max_scale_h2;
++            }
++        }
++    }
++
++#pragma unroll
++    for (int jc0 = 0; jc0 < cpw; ++jc0) {
++        const int jc = jc0 + (threadIdx.y/np)*cpw;
++
++        const int j = jc / ncols2;
++        const int c = jc % ncols2;
++
++        if (ncols1 > 1 && col_Q_0 + j >= int(ne01.z)) {
++            return;
++        }
++
++        const float scale = gridDim.y == 1 ? 1.0f/KQ_sum[jc0] : 1.0f;
++
++        const int j_dst_unrolled = ((sequence*int(ne01.z) + col_Q_0 + j)*ne02 + head0 + c)*gridDim.y + blockIdx.y;
++
++        constexpr int cpy_ne_D = cpy_ne/2 < (DVp/2)/warp_size ? cpy_ne/2 : (DVp/2)/warp_size;
++#pragma unroll
++        for (int i0 = 0; i0 < DVp/2; i0 += warp_size*cpy_ne_D) {
++            float2 tmp[cpy_ne_D];
++#pragma unroll
++            for (int i1 = 0; i1 < cpy_ne_D; ++i1) {
++                tmp[i1] = __half22float2(VKQ[jc0*((DVp/2)/warp_size) + i0/warp_size + i1]);
++                tmp[i1].x *= scale;
++                tmp[i1].y *= scale;
++            }
++            if (i0 + warp_size*cpy_ne_D <= DV/2 || i0 + threadIdx.x*cpy_ne_D < DV/2) {
++                ggml_cuda_memcpy_1<sizeof(tmp)>(&dst[j_dst_unrolled*DV + 2*i0 + threadIdx.x*(2*cpy_ne_D)], tmp);
++            }
++        }
++
++        if (gridDim.y != 1 && threadIdx.x == 0) {
++            dst_meta[j_dst_unrolled] = make_float2(KQ_max[jc0], KQ_sum[jc0]);
++        }
++    }
++#else
++    GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
++        max_bias, m0, m1, n_head_log2, logit_softcap,
++        ne00, ne01, ne02, ne03,
++              nb01, nb02, nb03,
++        ne10, ne11, ne12, ne13,
++              nb11, nb12, nb13,
++              nb21, nb22, nb23,
++              ne31, ne32, ne33,
++              nb31, nb32, nb33);
++    NO_DEVICE_CODE;
++#endif
++}
++
++template <int DKQ, int DV, int ncols2, bool use_logit_softcap>
++static void launch_fattn_tile_q8_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q = dst->src[0];
++
++    const int id        = ggml_cuda_get_device();
++    const int cc        = ggml_cuda_info().devices[id].cc;
++    const int warp_size = 32;
++
++    constexpr size_t nbytes_shared = 0;
++
++    if constexpr (DV <= 128) {
++        if (Q->ne[1] > 32/ncols2) {
++            constexpr int cols_per_block = 64;
++            const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++            const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++            fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++            launch_fattn<DV, cols_per_block/ncols2, ncols2>
++                (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++            return;
++        }
++    }
++
++    {
++        if (Q->ne[1] > 16/ncols2) {
++            constexpr int cols_per_block = 32;
++            const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++            const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++            fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++            launch_fattn<DV, cols_per_block/ncols2, ncols2>
++                (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++            return;
++        }
++    }
++
++    if (Q->ne[1] > 8/ncols2) {
++        constexpr int cols_per_block = 16;
++        const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++        const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++        fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++        launch_fattn<DV, cols_per_block/ncols2, ncols2>
++            (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++        return;
++    }
++
++    if constexpr (ncols2 <= 8) {
++        if (Q->ne[1] > 4/ncols2) {
++            constexpr int cols_per_block = 8;
++            const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++            const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++            fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++            launch_fattn<DV, cols_per_block/ncols2, ncols2>
++                (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++            return;
++        }
++    }
++
++    if constexpr (ncols2 <= 4) {
++        if (Q->ne[1] > 2/ncols2) {
++            constexpr int cols_per_block = 4;
++            const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++            const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++            fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++            launch_fattn<DV, cols_per_block/ncols2, ncols2>
++                (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++            return;
++        }
++    }
++
++    if constexpr (ncols2 <= 2) {
++        constexpr int cols_per_block = 2;
++        const int nwarps    = ggml_cuda_fattn_tile_q8_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
++        const int nbatch_fa = ggml_cuda_fattn_tile_q8_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
++        fattn_kernel_t fattn_kernel = flash_attn_tile_q8<DKQ, DV, cols_per_block/ncols2, ncols2, use_logit_softcap>;
++        launch_fattn<DV, cols_per_block/ncols2, ncols2>
++            (ctx, dst, fattn_kernel, nwarps, nbytes_shared, nbatch_fa, false, true, false, warp_size);
++        return;
++    }
++
++    GGML_ABORT("fatal error");
++}
++
++template <int DKQ, int DV, bool use_logit_softcap>
++static void launch_fattn_tile_q8_switch_ncols2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * KQV  = dst;
++    const ggml_tensor * Q    = dst->src[0];
++    const ggml_tensor * K    = dst->src[1];
++    const ggml_tensor * mask = dst->src[3];
++
++    float max_bias = 0.0f;
++    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
++
++    GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
++    const int gqa_ratio = Q->ne[2] / K->ne[2];
++
++    const bool nvidia = GGML_CUDA_CC_IS_NVIDIA(ggml_cuda_info().devices[ggml_cuda_get_device()].cc);
++    const int gqa_limit = nvidia && gqa_ratio <= 4 ? 16 : INT_MAX;
++    const bool use_gqa_opt = mask && max_bias == 0.0f && Q->ne[1] <= gqa_limit && K->ne[1] % FATTN_KQ_STRIDE == 0;
++
++    if constexpr (DV == 512) {
++        if (use_gqa_opt && gqa_ratio % 16 == 0) {
++            launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 16, use_logit_softcap>(ctx, dst);
++            return;
++        }
++    }
++
++    if constexpr (DV <= 256) {
++        if (use_gqa_opt && gqa_ratio % 8 == 0) {
++            launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 8, use_logit_softcap>(ctx, dst);
++            return;
++        }
++
++        if (use_gqa_opt && gqa_ratio % 4 == 0) {
++            launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 4, use_logit_softcap>(ctx, dst);
++            return;
++        }
++
++        if (use_gqa_opt && gqa_ratio % 2 == 0) {
++            launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 2, use_logit_softcap>(ctx, dst);
++            return;
++        }
++
++        launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 1, use_logit_softcap>(ctx, dst);
++        return;
++    }
++    GGML_ABORT("fatal error");
++}
++
++template <int DKQ, int DV>
++void ggml_cuda_flash_attn_ext_tile_q8_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * KQV = dst;
++
++    float logit_softcap;
++    memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
++
++    if (logit_softcap == 0.0f) {
++        constexpr bool use_logit_softcap = false;
++        launch_fattn_tile_q8_switch_ncols2<DKQ, DV, use_logit_softcap>(ctx, dst);
++    } else {
++        constexpr bool use_logit_softcap = true;
++        launch_fattn_tile_q8_switch_ncols2<DKQ, DV, use_logit_softcap>(ctx, dst);
++    }
++}
++
++void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++
++#ifdef DECL_FATTN_TILE_CASE
++#undef DECL_FATTN_TILE_CASE
++#endif
++
++#define DECL_FATTN_TILE_CASE(DKQ, DV)                             \
++    template void ggml_cuda_flash_attn_ext_tile_q8_case              \
++    <DKQ, DV>(ggml_backend_cuda_context & ctx, ggml_tensor * dst) \
++
++extern DECL_FATTN_TILE_CASE( 40,  40);
++extern DECL_FATTN_TILE_CASE( 64,  64);
++extern DECL_FATTN_TILE_CASE( 80,  80);
++extern DECL_FATTN_TILE_CASE( 96,  96);
++extern DECL_FATTN_TILE_CASE(112, 112);
++extern DECL_FATTN_TILE_CASE(128, 128);
++extern DECL_FATTN_TILE_CASE(256, 256);
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmq-prefetch.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmq-prefetch.cuh
+new file mode 100644
+index 00000000..013f5d9b
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmq-prefetch.cuh
+@@ -0,0 +1,149 @@
++#pragma once
++
++// Y-tile prefetch for MMQ: issues global_load_dword for next iteration
++// Hides memory latency by overlapping loads with compute
++
++#include "gfx906-config.h"
++
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++
++template<int mmq_x, int mmq_tile_y_k, int nwarps, int warp_size>
++static __device__ __forceinline__ int gfx906_prefetch_y_tile_v4(
++    const int * __restrict__ y,
++    const int ncols_y,
++    const int kb0,
++    const int kb0_stop,
++    const int qk,
++    const int blocks_per_iter) {
++
++    if (threadIdx.y != 0) {
++        return 0;
++    }
++
++    const int kb0_next = kb0 + blocks_per_iter;
++
++    if (kb0_next >= kb0_stop) {
++        return 0;
++    }
++
++    constexpr int block_q8_1_mmq_bytes = 144;
++    constexpr int QK8_1_val = 32;
++    const int stride_factor = qk * block_q8_1_mmq_bytes / (4 * QK8_1_val * sizeof(int));
++
++    const int * by_next = y + ncols_y * (kb0_next * stride_factor);
++
++    const int lane_id = threadIdx.x;
++    if (lane_id >= 2) {
++        return 0;
++    }
++
++    const int prefetch_offset = lane_id * 256;
++    const int * prefetch_addr = by_next + prefetch_offset;
++
++    int prefetch_data;
++    asm volatile(
++        "global_load_dword %0, %1, off\n"
++        : "=v"(prefetch_data)
++        : "v"(prefetch_addr)
++        : "memory"
++    );
++    return prefetch_data;
++}
++
++static __device__ __forceinline__ void gfx906_prefetch_consume(int prefetch_data) {
++    asm volatile(
++        "v_mov_b32 %0, %0\n"
++        : "+v"(prefetch_data)
++    );
++}
++
++template<int mmq_x, int mmq_tile_y_k, int nwarps, int warp_size>
++static __device__ __forceinline__ void gfx906_prefetch_y_tile_v2(
++    const int * __restrict__ y,
++    const int ncols_y,
++    const int kb0,
++    const int kb0_stop,
++    const int qk,
++    const int blocks_per_iter) {
++
++    const int kb0_next = kb0 + blocks_per_iter;
++
++    if (kb0_next >= kb0_stop) {
++        return;
++    }
++
++    const int tid = threadIdx.y * warp_size + threadIdx.x;
++
++    constexpr int total_elements = mmq_x * mmq_tile_y_k;
++    if (tid >= total_elements) {
++        return;
++    }
++
++    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
++
++    constexpr int block_q8_1_mmq_bytes = 144;
++    constexpr int QK8_1_val = 32;
++    const int stride_factor = qk * block_q8_1_mmq_bytes / (4 * QK8_1_val * sizeof(int));
++
++    const int * by_next = y + ncols_y * (kb0_next * stride_factor);
++    const int * prefetch_addr = by_next + tid;
++
++    int dummy;
++    asm volatile(
++        "global_load_dword %0, %1, off\n"
++        : "=v"(dummy)
++        : "v"(prefetch_addr)
++        : "memory"
++    );
++}
++
++template<int mmq_x, int mmq_tile_y_k, int nwarps, int warp_size>
++static __device__ __forceinline__ void gfx906_prefetch_y_tile_v1(
++    const int * __restrict__ y,
++    const int ncols_y,
++    const int kb0,
++    const int kb0_stop,
++    const int qk,
++    const int blocks_per_iter) {
++
++    const int kb0_next = kb0 + blocks_per_iter;
++
++    if (kb0_next >= kb0_stop) {
++        return;
++    }
++
++    const int tid = threadIdx.y * warp_size + threadIdx.x;
++    constexpr int total_elements = mmq_x * mmq_tile_y_k;
++
++    if (tid >= total_elements) {
++        return;
++    }
++
++    constexpr int block_q8_1_mmq_bytes = 144;
++    constexpr int QK8_1_val = 32;
++    const int stride_factor = qk * block_q8_1_mmq_bytes / (4 * QK8_1_val * sizeof(int));
++
++    const int * by_next = y + ncols_y * (kb0_next * stride_factor);
++    const int * prefetch_addr = by_next + tid;
++
++    int dummy;
++    asm volatile(
++        "global_load_dword %0, %1, off\n"
++        : "=v"(dummy)
++        : "v"(prefetch_addr)
++        : "memory"
++    );
++}
++
++template<int mmq_x, int mmq_tile_y_k, int nwarps, int warp_size>
++static __device__ __forceinline__ void gfx906_prefetch_y_tile_noop(
++    const int * __restrict__ y,
++    const int ncols_y,
++    const int kb0,
++    const int kb0_stop,
++    const int qk,
++    const int blocks_per_iter) {
++    (void)y; (void)ncols_y; (void)kb0; (void)kb0_stop; (void)qk; (void)blocks_per_iter;
++}
++
++#endif // defined(GGML_USE_HIP) && defined(__gfx906__)
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmq.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmq.cuh
+new file mode 100644
+index 00000000..2d4038d6
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmq.cuh
+@@ -0,0 +1,93 @@
++#pragma once
++
++// MMQ vectorized loads: 2x int4 (128-bit) instead of 8x scalar loads
++// Q8_0 software pipelining: separate load/store phases for better MLP
++
++#include "gfx906-config.h"
++#include "gfx906-vecdotq.cuh"
++
++#if defined(GGML_USE_HIP)
++
++static __device__ __forceinline__ void gfx906_load_q4_0_quants_vectorized(
++    const int * __restrict__ y_qs,
++    const int base_addr,
++    const int qi,
++    int * __restrict__ u) {
++
++    const int4 vec0 = *((const int4 *) &y_qs[base_addr]);
++    const int4 vec1 = *((const int4 *) &y_qs[base_addr + qi]);
++
++    u[0] = vec0.x; u[2] = vec0.y; u[4] = vec0.z; u[6] = vec0.w;
++    u[1] = vec1.x; u[3] = vec1.y; u[5] = vec1.z; u[7] = vec1.w;
++}
++
++static __device__ __forceinline__ void gfx906_load_q4_1_quants_vectorized(
++    const int * __restrict__ y_qs,
++    const int base_addr,
++    const int qi,
++    int * __restrict__ u) {
++
++    const int4 vec0 = *((const int4 *) &y_qs[base_addr]);
++    const int4 vec1 = *((const int4 *) &y_qs[base_addr + qi]);
++
++    u[0] = vec0.x; u[2] = vec0.y; u[4] = vec0.z; u[6] = vec0.w;
++    u[1] = vec1.x; u[3] = vec1.y; u[5] = vec1.z; u[7] = vec1.w;
++}
++
++template<int VDR>
++static __device__ __forceinline__ void gfx906_load_quants_vectorized(
++    const int * __restrict__ y_qs,
++    const int base_addr,
++    const int qi,
++    int * __restrict__ u) {
++
++    static_assert(VDR == 4, "Only VDR=4 supported for vectorized loads");
++
++    const int4 vec0 = *((const int4 *) &y_qs[base_addr]);
++    const int4 vec1 = *((const int4 *) &y_qs[base_addr + qi]);
++
++    u[0] = vec0.x; u[2] = vec0.y; u[4] = vec0.z; u[6] = vec0.w;
++    u[1] = vec1.x; u[3] = vec1.y; u[5] = vec1.z; u[7] = vec1.w;
++}
++
++#if defined(__gfx906__)
++
++#define GFX906_LOAD_TILES_Q8_0_ASYNC(cache_size, nrows, nwarps, threads_per_row, need_check, \
++    x, kbx0, stride, i_max, txi, kbx, kqsx, qs0_cache, qs1_cache, i_slot_cache) \
++    do { \
++        _Pragma("unroll") \
++        for (int iter = 0; iter < cache_size; iter++) { \
++            const int i0 = iter * nrows * nwarps; \
++            const int i_slot = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row); \
++            const int i_read = need_check ? min(i_slot, i_max) : i_slot; \
++            const bool oob = need_check && (i_slot > i_max); \
++            const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbx; \
++            qs0_cache[iter] = oob ? 0 : gfx906_get_int_b2_fast(bxi[0].qs, kqsx); \
++            qs1_cache[iter] = oob ? 0 : gfx906_get_int_b2_fast(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx); \
++            i_slot_cache[iter] = i_slot; \
++        } \
++    } while(0)
++
++#define GFX906_STORE_TILES_Q8_0_LDS_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi) \
++    do { \
++        _Pragma("unroll") \
++        for (int iter = 0; iter < cache_size; iter++) { \
++            const int i_slot = i_slot_cache[iter]; \
++            x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = qs0_cache[iter]; \
++            x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = qs1_cache[iter]; \
++        } \
++    } while(0)
++
++#define GFX906_STORE_TILES_Q8_0_LDS_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi) \
++    do { \
++        _Pragma("unroll") \
++        for (int iter = 0; iter < cache_size; iter++) { \
++            const int i_slot = i_slot_cache[iter]; \
++            x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = qs0_cache[iter]; \
++            x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = qs1_cache[iter]; \
++        } \
++    } while(0)
++
++#endif // defined(__gfx906__)
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_0.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_0.cuh
+new file mode 100644
+index 00000000..0d2f5b15
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_0.cuh
+@@ -0,0 +1,119 @@
++#pragma once
++
++// GFX906 Warp-Cooperative Q4_1 GEMV Kernel
++// Uses half-warp (32 threads) per row for better memory coalescing
++// Achieves better bandwidth improvement over sequential per-thread approach, which results in faster performance for small matrixes (ncols less than 1024)
++// This kernel is only included from mmvq.cu where all dependencies are available
++
++#if defined(GGML_USE_HIP)
++
++__launch_bounds__(64, 1)
++static __global__ void gfx906_mul_mat_vec_q4_0_warp_coop(
++        const void * __restrict__ vx, const void * __restrict__ vy,
++        const int32_t * __restrict__ ids,
++        float * __restrict__ dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x) {
++
++    constexpr int qk_q4_0 = 32;
++
++    const int lane_id = threadIdx.x;
++    const int half_lane = lane_id % 32;
++    const int row_offset = lane_id / 32;
++
++    const int row = blockIdx.x * 2 + row_offset;
++
++    if (row >= (int)nrows_x) return;
++
++    const uint32_t channel_dst = blockIdx.y;
++    const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
++    const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
++    const uint32_t sample_dst  = blockIdx.z;
++    const uint32_t sample_x    = fastdiv(sample_dst, sample_ratio);
++    const uint32_t sample_y    = sample_dst;
++
++    const int blocks_per_row = ncols_x / qk_q4_0;
++    const int kbx_offset = sample_x * stride_sample_x + channel_x * stride_channel_x + row * stride_row_x;
++
++    const block_q4_0 * x = (const block_q4_0 *)vx + kbx_offset;
++    const block_q8_1 * y = (const block_q8_1 *)vy + sample_y * stride_sample_y + channel_y * stride_channel_y;
++
++    float sumf = 0.0f;
++
++    for (int ib = half_lane; ib < blocks_per_row; ib += 32) {
++        const block_q4_0 * bq4 = x + ib;
++        const block_q8_1 * bq8 = y + ib;
++
++        // Load 16 bytes of Q4_0 quantized values (32 nibbles)
++        int v0, v1, v2, v3;
++        memcpy(&v0, bq4->qs +  0, 4);
++        memcpy(&v1, bq4->qs +  4, 4);
++        memcpy(&v2, bq4->qs +  8, 4);
++        memcpy(&v3, bq4->qs + 12, 4);
++
++        // Load 32 bytes of Q8_1 quantized values
++        const int * q8 = (const int *)bq8->qs;
++        const int u0 = q8[0];
++        const int u1 = q8[1];
++        const int u2 = q8[2];
++        const int u3 = q8[3];
++        const int u4 = q8[4];
++        const int u5 = q8[5];
++        const int u6 = q8[6];
++        const int u7 = q8[7];
++
++        // Compute dot product (8 dp4a for full 32 values)
++        int sumi = 0;
++        sumi = ggml_cuda_dp4a((v0 >> 0) & 0x0F0F0F0F, u0, sumi);
++        sumi = ggml_cuda_dp4a((v0 >> 4) & 0x0F0F0F0F, u4, sumi);
++        sumi = ggml_cuda_dp4a((v1 >> 0) & 0x0F0F0F0F, u1, sumi);
++        sumi = ggml_cuda_dp4a((v1 >> 4) & 0x0F0F0F0F, u5, sumi);
++        sumi = ggml_cuda_dp4a((v2 >> 0) & 0x0F0F0F0F, u2, sumi);
++        sumi = ggml_cuda_dp4a((v2 >> 4) & 0x0F0F0F0F, u6, sumi);
++        sumi = ggml_cuda_dp4a((v3 >> 0) & 0x0F0F0F0F, u3, sumi);
++        sumi = ggml_cuda_dp4a((v3 >> 4) & 0x0F0F0F0F, u7, sumi);
++
++        // Q4_0 formula: d4 * (sumi * d8 - 8 * s8)
++        // where s8 is the sum of Q8 values (stored in bq8->ds.y)
++        const float d4 = bq4->d;
++        const float2 ds8 = __half22float2(bq8->ds);
++        sumf += d4 * (sumi * ds8.x - 8.0f * ds8.y);
++    }
++
++    // Half-warp reduction using fused DPP instructions
++    sumf = warp_reduce_sum<32>(sumf);
++
++    if (half_lane == 0) {
++        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = sumf;
++    }
++}
++
++static void gfx906_launch_mul_mat_vec_q4_0_warp_coop(
++        const void * vx, const void * vy, const int32_t * ids,
++        float * dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x,
++        const uint32_t nchannels_dst, const uint32_t nsamples_dst,
++        cudaStream_t stream) {
++
++    const dim3 block_dims(64, 1, 1);
++    const dim3 block_nums((nrows_x + 1) / 2, nchannels_dst, nsamples_dst);
++
++    gfx906_mul_mat_vec_q4_0_warp_coop<<<block_nums, block_dims, 0, stream>>>(
++        vx, vy, ids, dst, ncols_x, nchannels_y, stride_row_x,
++        stride_col_dst, channel_ratio, stride_channel_x, stride_channel_y,
++        stride_channel_dst, sample_ratio, stride_sample_x, stride_sample_y,
++        stride_sample_dst, nrows_x);
++}
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_1.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_1.cuh
+new file mode 100644
+index 00000000..72752554
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q4_1.cuh
+@@ -0,0 +1,122 @@
++#pragma once
++
++// GFX906 Warp-Cooperative Q4_1 GEMV Kernel
++// Uses half-warp (32 threads) per row for better memory coalescing
++// Achieves better bandwidth improvement over sequential per-thread approach, which results in faster performance for small matrixes (ncols less than 1024)
++// This kernel is only included from mmvq.cu where all dependencies are available
++
++#if defined(GGML_USE_HIP)
++
++__launch_bounds__(64, 1)
++static __global__ void gfx906_mul_mat_vec_q4_1_warp_coop(
++        const void * __restrict__ vx, const void * __restrict__ vy,
++        const int32_t * __restrict__ ids,
++        float * __restrict__ dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x) {
++
++    constexpr int qk_q4_1 = 32;
++
++    const int lane_id = threadIdx.x;
++    const int half_lane = lane_id % 32;      
++    const int row_offset = lane_id / 32;     
++    const int row = blockIdx.x * 2 + row_offset;
++
++    if (row >= (int)nrows_x) return;
++
++    const uint32_t channel_dst = blockIdx.y;
++    const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
++    const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
++    const uint32_t sample_dst  = blockIdx.z;
++    const uint32_t sample_x    = fastdiv(sample_dst, sample_ratio);
++    const uint32_t sample_y    = sample_dst;
++
++    const int blocks_per_row = ncols_x / qk_q4_1;
++    const int kbx_offset = sample_x * stride_sample_x + channel_x * stride_channel_x + row * stride_row_x;
++
++    const block_q4_1 * x = (const block_q4_1 *)vx + kbx_offset;
++    const block_q8_1 * y = (const block_q8_1 *)vy + sample_y * stride_sample_y + channel_y * stride_channel_y;
++
++    float sumf = 0.0f;
++
++    for (int ib = half_lane; ib < blocks_per_row; ib += 32) {
++        const block_q4_1 * bq4 = x + ib;
++        const block_q8_1 * bq8 = y + ib;  
++
++        // Load ALL 16 bytes of Q4_1 quantized values (32 nibbles = 32 values)
++        int v0, v1, v2, v3;
++        memcpy(&v0, bq4->qs +  0, 4);  // bytes 0-3:   values 0-3 (low), 16-19 (high)
++        memcpy(&v1, bq4->qs +  4, 4);  // bytes 4-7:   values 4-7 (low), 20-23 (high)
++        memcpy(&v2, bq4->qs +  8, 4);  // bytes 8-11:  values 8-11 (low), 24-27 (high)
++        memcpy(&v3, bq4->qs + 12, 4);  // bytes 12-15: values 12-15 (low), 28-31 (high)
++
++        // Load ALL 32 bytes of Q8_1 quantized values (32 int8 values)
++        const int * q8 = (const int *)bq8->qs;
++        const int u0 = q8[0];  // Q8 values 0-3
++        const int u1 = q8[1];  // Q8 values 4-7
++        const int u2 = q8[2];  // Q8 values 8-11
++        const int u3 = q8[3];  // Q8 values 12-15
++        const int u4 = q8[4];  // Q8 values 16-19
++        const int u5 = q8[5];  // Q8 values 20-23
++        const int u6 = q8[6];  // Q8 values 24-27
++        const int u7 = q8[7];  // Q8 values 28-31
++
++        // Compute dot product with nibble extraction (8 dp4a for full 32 values)
++        int sumi = 0;
++        sumi = ggml_cuda_dp4a((v0 >> 0) & 0x0F0F0F0F, u0, sumi);  // Q4 0-3 * Q8 0-3
++        sumi = ggml_cuda_dp4a((v0 >> 4) & 0x0F0F0F0F, u4, sumi);  // Q4 16-19 * Q8 16-19
++        sumi = ggml_cuda_dp4a((v1 >> 0) & 0x0F0F0F0F, u1, sumi);  // Q4 4-7 * Q8 4-7
++        sumi = ggml_cuda_dp4a((v1 >> 4) & 0x0F0F0F0F, u5, sumi);  // Q4 20-23 * Q8 20-23
++        sumi = ggml_cuda_dp4a((v2 >> 0) & 0x0F0F0F0F, u2, sumi);  // Q4 8-11 * Q8 8-11
++        sumi = ggml_cuda_dp4a((v2 >> 4) & 0x0F0F0F0F, u6, sumi);  // Q4 24-27 * Q8 24-27
++        sumi = ggml_cuda_dp4a((v3 >> 0) & 0x0F0F0F0F, u3, sumi);  // Q4 12-15 * Q8 12-15
++        sumi = ggml_cuda_dp4a((v3 >> 4) & 0x0F0F0F0F, u7, sumi);  // Q4 28-31 * Q8 28-31
++
++        // Load and apply scale/bias: Q4_1 has (d, m), Q8_1 has (d, s)
++        // Full block formula: result = sumi * d4 * d8 + m4 * s8
++        const float2 dm4 = __half22float2(bq4->dm);
++        const float2 ds8 = __half22float2(bq8->ds);
++        sumf += sumi * dm4.x * ds8.x + dm4.y * ds8.y;
++    }
++
++    // Half-warp reduction using fused DPP instructions
++    sumf = warp_reduce_sum<32>(sumf);
++
++    // First thread of each half-warp writes result
++    if (half_lane == 0) {
++        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = sumf;
++    }
++}
++
++// Host-side dispatch function for GFX906 Q4_1 warp-cooperative kernel
++static void gfx906_launch_mul_mat_vec_q4_1_warp_coop(
++        const void * vx, const void * vy, const int32_t * ids,
++        float * dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x,
++        const uint32_t nchannels_dst, const uint32_t nsamples_dst,
++        cudaStream_t stream) {
++
++    // 2 rows per block, 64 threads per block (1 warp processing 2 rows)
++    const dim3 block_dims(64, 1, 1);
++    const dim3 block_nums((nrows_x + 1) / 2, nchannels_dst, nsamples_dst);
++
++    gfx906_mul_mat_vec_q4_1_warp_coop<<<block_nums, block_dims, 0, stream>>>(
++        vx, vy, ids, dst, ncols_x, nchannels_y, stride_row_x,
++        stride_col_dst, channel_ratio, stride_channel_x, stride_channel_y,
++        stride_channel_dst, sample_ratio, stride_sample_x, stride_sample_y,
++        stride_sample_dst, nrows_x);
++}
++
++#endif // GGML_USE_HIP
++ 
+\ No newline at end of file
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+new file mode 100644
+index 00000000..0feed709
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q5_k.cuh
+@@ -0,0 +1,94 @@
++#pragma once
++
++// GFX906 Warp-Cooperative Q5_K GEMV Kernel
++// Uses half-warp (32 threads) per row for better memory coalescing
++// Designed for small matrices (ncols <= 1024)
++
++#if defined(GGML_USE_HIP)
++
++__launch_bounds__(64, 1)
++static __global__ void gfx906_mul_mat_vec_q5_K_warp_coop(
++        const void * __restrict__ vx, const void * __restrict__ vy,
++        const int32_t * __restrict__ ids,
++        float * __restrict__ dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x) {
++
++    constexpr int qk_q5_k = QK_K;
++    constexpr int qi_q5_k = QI5_K;
++    constexpr int vdr_q5_k = VDR_Q5_K_Q8_1_MMVQ;
++
++    const int lane_id = threadIdx.x;
++    const int half_lane = lane_id % 32;
++    const int row_offset = lane_id / 32;
++
++    const int row = blockIdx.x * 2 + row_offset;
++    if (row >= (int)nrows_x) return;
++
++    const uint32_t channel_dst = blockIdx.y;
++    const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
++    const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
++    const uint32_t sample_dst  = blockIdx.z;
++    const uint32_t sample_x    = fastdiv(sample_dst, sample_ratio);
++    const uint32_t sample_y    = sample_dst;
++
++    const int blocks_per_row = ncols_x / qk_q5_k;
++    const int kbx_offset = sample_x * stride_sample_x + channel_x * stride_channel_x + row * stride_row_x;
++
++    const block_q5_K * x = (const block_q5_K *)vx + kbx_offset;
++    const block_q8_1 * y = (const block_q8_1 *)vy + sample_y * stride_sample_y + channel_y * stride_channel_y;
++
++    float sumf = 0.0f;
++
++    constexpr int q8_blocks_per_q5 = qk_q5_k / QK8_1;
++    constexpr int lanes_per_block = qi_q5_k / vdr_q5_k;
++
++    for (int ib = 0; ib < blocks_per_row; ++ib) {
++        float partial = 0.0f;
++        if (half_lane < lanes_per_block) {
++            const int iqs = vdr_q5_k * half_lane;
++            const int kby = ib * q8_blocks_per_q5;
++            partial = vec_dot_q5_K_q8_1(x, y + kby, ib, iqs);
++        }
++
++        partial = warp_reduce_sum<32>(partial);
++
++        if (half_lane == 0) {
++            sumf += partial;
++        }
++    }
++
++    if (half_lane == 0) {
++        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = sumf;
++    }
++}
++
++static void gfx906_launch_mul_mat_vec_q5_K_warp_coop(
++        const void * vx, const void * vy, const int32_t * ids,
++        float * dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x,
++        const uint32_t nchannels_dst, const uint32_t nsamples_dst,
++        cudaStream_t stream) {
++
++    const dim3 block_dims(64, 1, 1);
++    const dim3 block_nums((nrows_x + 1) / 2, nchannels_dst, nsamples_dst);
++
++    gfx906_mul_mat_vec_q5_K_warp_coop<<<block_nums, block_dims, 0, stream>>>(
++        vx, vy, ids, dst, ncols_x, nchannels_y, stride_row_x,
++        stride_col_dst, channel_ratio, stride_channel_x, stride_channel_y,
++        stride_channel_dst, sample_ratio, stride_sample_x, stride_sample_y,
++        stride_sample_dst, nrows_x);
++}
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q8_0.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q8_0.cuh
+new file mode 100644
+index 00000000..08bf4d92
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-mmvq-q8_0.cuh
+@@ -0,0 +1,120 @@
++#pragma once
++
++// GFX906 Warp-Cooperative Q8_0 GEMV Kernel
++// Simpler than Q4 variants - no nibble extraction needed
++
++#if defined(GGML_USE_HIP)
++
++__launch_bounds__(64, 1)
++static __global__ void gfx906_mul_mat_vec_q8_0_warp_coop(
++        const void * __restrict__ vx, const void * __restrict__ vy,
++        const int32_t * __restrict__ ids,
++        float * __restrict__ dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x) {
++
++    constexpr int qk_q8_0 = 32;
++
++    const int lane_id = threadIdx.x;
++    const int half_lane = lane_id % 32;
++    const int row_offset = lane_id / 32;
++
++    const int row = blockIdx.x * 2 + row_offset;
++
++    if (row >= (int)nrows_x) return;
++
++    const uint32_t channel_dst = blockIdx.y;
++    const uint32_t channel_x   = ids ? ids[channel_dst] : fastdiv(channel_dst, channel_ratio);
++    const uint32_t channel_y   = ids ? fastmodulo(channel_dst, nchannels_y) : channel_dst;
++    const uint32_t sample_dst  = blockIdx.z;
++    const uint32_t sample_x    = fastdiv(sample_dst, sample_ratio);
++    const uint32_t sample_y    = sample_dst;
++
++    const int blocks_per_row = ncols_x / qk_q8_0;
++    const int kbx_offset = sample_x * stride_sample_x + channel_x * stride_channel_x + row * stride_row_x;
++
++    const block_q8_0 * x = (const block_q8_0 *)vx + kbx_offset;
++    const block_q8_1 * y = (const block_q8_1 *)vy + sample_y * stride_sample_y + channel_y * stride_channel_y;
++
++    float sumf = 0.0f;
++
++    for (int ib = half_lane; ib < blocks_per_row; ib += 32) {
++        const block_q8_0 * bq8_0 = x + ib;
++        const block_q8_1 * bq8_1 = y + ib;
++
++        // Load 32 bytes of Q8_0 quantized values (32 int8 values)
++        const int * v = (const int *)bq8_0->qs;
++        const int v0 = v[0];
++        const int v1 = v[1];
++        const int v2 = v[2];
++        const int v3 = v[3];
++        const int v4 = v[4];
++        const int v5 = v[5];
++        const int v6 = v[6];
++        const int v7 = v[7];
++
++        // Load 32 bytes of Q8_1 quantized values
++        const int * u = (const int *)bq8_1->qs;
++        const int u0 = u[0];
++        const int u1 = u[1];
++        const int u2 = u[2];
++        const int u3 = u[3];
++        const int u4 = u[4];
++        const int u5 = u[5];
++        const int u6 = u[6];
++        const int u7 = u[7];
++
++        // Compute dot product (8 dp4a for full 32 values)
++        int sumi = 0;
++        sumi = ggml_cuda_dp4a(v0, u0, sumi);
++        sumi = ggml_cuda_dp4a(v1, u1, sumi);
++        sumi = ggml_cuda_dp4a(v2, u2, sumi);
++        sumi = ggml_cuda_dp4a(v3, u3, sumi);
++        sumi = ggml_cuda_dp4a(v4, u4, sumi);
++        sumi = ggml_cuda_dp4a(v5, u5, sumi);
++        sumi = ggml_cuda_dp4a(v6, u6, sumi);
++        sumi = ggml_cuda_dp4a(v7, u7, sumi);
++
++        // Q8_0 formula: d0 * d1 * sumi (simple!)
++        const float d0 = bq8_0->d;
++        const float d1 = __low2float(bq8_1->ds);
++        sumf += d0 * d1 * (float)sumi;
++    }
++
++    // Half-warp reduction using fused DPP instructions
++    sumf = warp_reduce_sum<32>(sumf);
++
++    if (half_lane == 0) {
++        dst[sample_dst * stride_sample_dst + channel_dst * stride_channel_dst + row] = sumf;
++    }
++}
++
++static void gfx906_launch_mul_mat_vec_q8_0_warp_coop(
++        const void * vx, const void * vy, const int32_t * ids,
++        float * dst,
++        const uint32_t ncols_x, const uint3 nchannels_y,
++        const uint32_t stride_row_x,
++        const uint32_t stride_col_dst, const uint3 channel_ratio,
++        const uint32_t stride_channel_x, const uint32_t stride_channel_y,
++        const uint32_t stride_channel_dst, const uint3 sample_ratio,
++        const uint32_t stride_sample_x, const uint32_t stride_sample_y,
++        const uint32_t stride_sample_dst, const uint32_t nrows_x,
++        const uint32_t nchannels_dst, const uint32_t nsamples_dst,
++        cudaStream_t stream) {
++
++    const dim3 block_dims(64, 1, 1);
++    const dim3 block_nums((nrows_x + 1) / 2, nchannels_dst, nsamples_dst);
++
++    gfx906_mul_mat_vec_q8_0_warp_coop<<<block_nums, block_dims, 0, stream>>>(
++        vx, vy, ids, dst, ncols_x, nchannels_y, stride_row_x,
++        stride_col_dst, channel_ratio, stride_channel_x, stride_channel_y,
++        stride_channel_dst, sample_ratio, stride_sample_x, stride_sample_y,
++        stride_sample_dst, nrows_x);
++}
++
++#endif // GGML_USE_HIP
+diff --git a/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+new file mode 100644
+index 00000000..92f37bde
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/gfx906-vecdotq.cuh
+@@ -0,0 +1,62 @@
++#pragma once
++
++// MXFP4 dequantization using v_perm_b32 for 8-entry table lookup
++// Unaligned memory loads via memcpy (compiler optimizes to flat_load)
++
++#include "gfx906-config.h"
++
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++
++static __device__ __forceinline__ int gfx906_get_int_b1_fast(const void * x, const int & i32) {
++    const uint8_t * x8 = (const uint8_t *) x;
++    int x32;
++    memcpy(&x32, x8 + 4*i32, 4);
++    return x32;
++}
++
++static __device__ __forceinline__ int gfx906_get_int_b2_fast(const void * x, const int & i32) {
++    int x32;
++    memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
++    return x32;
++}
++
++__constant__ uint8_t gfx906_mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
++
++static __device__ __forceinline__ int2 gfx906_get_int_from_mxfp4_table(const uint32_t q4) {
++    const uint32_t *mags32 = (const uint32_t *)gfx906_mxfp4_magnitudes;
++
++    const uint32_t q_even = q4;
++    const uint32_t q_odd  = q4 >> 4;
++
++    uint32_t sign_even = (q_even >> 3) & 0x01010101;
++    uint32_t sign_odd  = (q_odd  >> 3) & 0x01010101;
++
++    const uint32_t sel_even = q_even & 0x07070707;
++    const uint32_t sel_odd  = q_odd  & 0x07070707;
++
++    uint32_t mag_even = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_even);
++    uint32_t mag_odd  = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_odd);
++
++    const uint32_t mask_even = sign_even * 0xFFu;
++    const uint32_t mask_odd  = sign_odd  * 0xFFu;
++
++    uint32_t res_x = (mag_even ^ mask_even) + sign_even;
++    uint32_t res_y = (mag_odd  ^ mask_odd)  + sign_odd;
++
++    return make_int2(res_x, res_y);
++}
++
++#define GFX906_VEC_DOT_MXFP4_Q8_1(bq4, bq8_1, iqs, sumi) \
++    do { \
++        const int * q8 = (const int *) bq8_1->qs + iqs; \
++        const int aux_q4_0 = gfx906_get_int_b1_fast(bq4->qs, iqs + 0); \
++        const int aux_q4_1 = gfx906_get_int_b1_fast(bq4->qs, iqs + 1); \
++        const int2 v0 = gfx906_get_int_from_mxfp4_table(aux_q4_0); \
++        const int2 v1 = gfx906_get_int_from_mxfp4_table(aux_q4_1); \
++        sumi = ggml_cuda_dp4a(v0.x, q8[0], sumi); \
++        sumi = ggml_cuda_dp4a(v0.y, q8[4], sumi); \
++        sumi = ggml_cuda_dp4a(v1.x, q8[1], sumi); \
++        sumi = ggml_cuda_dp4a(v1.y, q8[5], sumi); \
++    } while(0)
++
++#endif
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq112-dv112.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq112-dv112.cu
+new file mode 100644
+index 00000000..7d2741eb
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq112-dv112.cu
+@@ -0,0 +1,7 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++// Phase 5: Temporarily disabled - DKQ=112 is not multiple of 32 (Q8_0 block size)
++// TODO: Re-enable after adding support for non-32-multiple head sizes
++// DECL_FATTN_TILE_CASE(112, 112);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq128-dv128.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq128-dv128.cu
+new file mode 100644
+index 00000000..97bc60b0
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq128-dv128.cu
+@@ -0,0 +1,5 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++DECL_FATTN_TILE_CASE(128, 128);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq256-dv256.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq256-dv256.cu
+new file mode 100644
+index 00000000..3c288b35
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq256-dv256.cu
+@@ -0,0 +1,5 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++DECL_FATTN_TILE_CASE(256, 256);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq40-dv40.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq40-dv40.cu
+new file mode 100644
+index 00000000..0c548f17
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq40-dv40.cu
+@@ -0,0 +1,7 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++// Phase 5: Temporarily disabled - DKQ=40 is not multiple of 32 (Q8_0 block size)
++// TODO: Re-enable after adding support for non-32-multiple head sizes
++// DECL_FATTN_TILE_CASE(40, 40);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq576-dv512.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq576-dv512.cu
+new file mode 100644
+index 00000000..4120d8ab
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq576-dv512.cu
+@@ -0,0 +1,5 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++DECL_FATTN_TILE_CASE(576, 512);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq64-dv64.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq64-dv64.cu
+new file mode 100644
+index 00000000..ed0d0773
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq64-dv64.cu
+@@ -0,0 +1,5 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++DECL_FATTN_TILE_CASE(64, 64);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq80-dv80.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq80-dv80.cu
+new file mode 100644
+index 00000000..a9fe648c
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq80-dv80.cu
+@@ -0,0 +1,7 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++// Phase 5: Temporarily disabled - DKQ=80 is not multiple of 32 (Q8_0 block size)
++// TODO: Re-enable after adding support for non-32-multiple head sizes
++// DECL_FATTN_TILE_CASE(80, 80);
+diff --git a/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq96-dv96.cu b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq96-dv96.cu
+new file mode 100644
+index 00000000..78839861
+--- /dev/null
++++ b/ggml/src/ggml-cuda/gfx906/template-instances/fattn-tile-q8-instance-dkq96-dv96.cu
+@@ -0,0 +1,5 @@
++// Q8 kernel template instantiation
++
++#include "../gfx906-fattn-q8.cuh"
++
++DECL_FATTN_TILE_CASE(96, 96);
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index cfcffde8..0eb121ec 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2916,9 +2916,9 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+     return use_cuda_graph;
+ }
+ 
+-static void ggml_cuda_graph_node_set_properties(ggml_cuda_graph_node_properties * props, ggml_tensor * node) {
+-    memset(props, 0, sizeof(ggml_cuda_graph_node_properties));
+-    props->node_data = node->data;
++static void ggml_cuda_graph_node_set_properties(ggml_graph_node_properties * props, ggml_tensor * node) {
++    memset(props, 0, sizeof(ggml_graph_node_properties));
++    props->node_address = node->data;
+     props->node_op = node->op;
+     props->flags = node->flags;
+     for (int i = 0; i < GGML_MAX_DIMS; i++) {
+@@ -2935,8 +2935,8 @@ static void ggml_cuda_graph_node_set_properties(ggml_cuda_graph_node_properties
+     memcpy(props->op_params, node->op_params, GGML_MAX_OP_PARAMS);
+ }
+ 
+-static bool ggml_cuda_graph_node_properties_match(ggml_tensor * node, ggml_cuda_graph_node_properties * props) {
+-    if (node->data != props->node_data && node->op != GGML_OP_VIEW) {
++static bool ggml_cuda_graph_node_properties_match(ggml_tensor * node, ggml_graph_node_properties * props) {
++    if (node->data != props->node_address && node->op != GGML_OP_VIEW) {
+         return false;
+     }
+ 
+@@ -2995,9 +2995,9 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
+     }
+ 
+     // Check if the graph size has changed
+-    if (graph->props.size() != (size_t)cgraph->n_nodes) {
++    if (graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
+         res = true;
+-        graph->props.resize(cgraph->n_nodes);
++        graph->ggml_graph_properties.resize(cgraph->n_nodes);
+     }
+ 
+     // Loop over nodes in GGML graph to determine if CUDA graph update is required
+@@ -3010,12 +3010,12 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
+         seen_node.insert(cgraph->nodes[i]);
+ 
+         if (!res) {
+-            props_match = ggml_cuda_graph_node_properties_match(cgraph->nodes[i], &graph->props[i]);
++            props_match = ggml_cuda_graph_node_properties_match(cgraph->nodes[i], &graph->ggml_graph_properties[i]);
+         }
+         if (!props_match) {
+             res = true;
+         }
+-        ggml_cuda_graph_node_set_properties(&graph->props[i], cgraph->nodes[i]);
++        ggml_cuda_graph_node_set_properties(&graph->ggml_graph_properties[i], cgraph->nodes[i]);
+ 
+         for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+             ggml_tensor * src = cgraph->nodes[i]->src[src_idx];
+@@ -5118,4 +5118,21 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
+     return cuda_backend;
+ }
+ 
++static int ggml_backend_cuda_score_impl(void) {
++    return ggml_backend_cuda_get_device_count() > 0 ? 100 : 0;
++}
++
+ GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
++GGML_BACKEND_DL_SCORE_IMPL(ggml_backend_cuda_score_impl)
++
++#ifndef GGML_BACKEND_DL
++extern "C" {
++GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void) {
++    return ggml_backend_cuda_reg();
++}
++
++GGML_BACKEND_API int ggml_backend_score(void) {
++    return ggml_backend_cuda_score_impl();
++}
++}
++#endif
+diff --git a/ggml/src/ggml-cuda/mmid.cu b/ggml/src/ggml-cuda/mmid.cu
+index 3c61e459..73624eb1 100644
+--- a/ggml/src/ggml-cuda/mmid.cu
++++ b/ggml/src/ggml-cuda/mmid.cu
+@@ -138,6 +138,18 @@ static void launch_mm_ids_helper(
+ void ggml_cuda_launch_mm_ids_helper(
+         const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
+         const int n_experts, const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, cudaStream_t stream) {
++
++#if defined(GGML_USE_HIP)
++    // AMD wave64 GPUs use sub-warp shuffles that break down for large expert counts.
++    // Fall back to the generic path when more than half a warp participates.
++    const int id = ggml_cuda_get_device();
++    const int warp_size = ggml_cuda_info().devices[id].warp_size;
++    if (n_expert_used >= warp_size / 2) {
++        launch_mm_ids_helper<0>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
++        return;
++    }
++#endif
++
+     switch (n_expert_used) {
+         case  2:
+             launch_mm_ids_helper< 2>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
+diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
+index 9a69f41d..91da74f5 100644
+--- a/ggml/src/ggml-cuda/mmq.cu
++++ b/ggml/src/ggml-cuda/mmq.cu
+@@ -244,9 +244,10 @@ void ggml_cuda_op_mul_mat_q(
+     // The stream-k decomposition is only faster for recent NVIDIA GPUs.
+     // Also its fixup needs to allocate a temporary buffer in the memory pool.
+     // There are multiple parallel CUDA streams for src1_ncols != ne11 which would introduce a race condition for this buffer.
+-    const bool use_stream_k = ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA)
+-                            || GGML_CUDA_CC_IS_CDNA(cc))
+-                            && src1_ncols == ne11;
++    const bool use_stream_k = (((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA)
++                             || GGML_CUDA_CC_IS_CDNA(cc))
++                             && src1_ncols == ne11);
++
+     const mmq_args args = {
+         src0_dd_i, src0->type, (const int *) src1_ddq_i, nullptr, nullptr, dst_dd_i,
+         ne00, row_diff, src1_ncols, stride01, ne11, nrows_dst,
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index a382e6a6..19897597 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -9,10 +9,24 @@
+ 
+ using namespace ggml_cuda_mma;
+ 
++// GFX906 MMQ optimizations (vectorized loads and prefetch)
++#ifdef GGML_USE_HIP
++    #include "gfx906/gfx906-mmq.cuh"
++    #include "gfx906/gfx906-config.h"
++    #include "gfx906/gfx906-mmq-prefetch.cuh"
++#endif
++
+ #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
+-#define MMQ_ITER_K 256
+-#define MMQ_ITER_K_MXFP4_FP4    512
+-#define MMQ_NWARPS 8
++
++// GFX906-optimized MMQ configuration
++#ifdef GGML_USE_HIP
++    #define MMQ_ITER_K GFX906_MMQ_ITER_K
++    #define MMQ_NWARPS GFX906_MMQ_NWARPS
++#else
++    #define MMQ_ITER_K 256
++    #define MMQ_NWARPS 8
++#endif
++#define MMQ_ITER_K_MXFP4_FP4 512
+ 
+ typedef void (*load_tiles_mmq_t)(const char * __restrict__ x, int * x_tile, const int kbx0, const int i_max, const int stride);
+ typedef void (*vec_dot_mmq_t)(const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
+@@ -133,8 +147,17 @@ static constexpr __device__ int get_mmq_x_max_device() {
+ }
+ 
+ static int get_mmq_y_host(const int cc) {
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
++#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
++#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
++#endif
++#endif
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_MMQ_Y)
++    return GGML_HIP_MMQ_Y;
++#else
+     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
+         ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ? 128 : 64);
++#endif
+ }
+ 
+ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type) {
+@@ -147,11 +170,16 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
+ 
+ static constexpr __device__ int get_mmq_y_device() {
+ #if defined(GGML_USE_HIP)
+-#if defined(RDNA1)
++#if defined(GGML_HIP_MMQ_Y)
++#if !((GGML_HIP_MMQ_Y == 32) || (GGML_HIP_MMQ_Y == 64) || (GGML_HIP_MMQ_Y == 96) || (GGML_HIP_MMQ_Y == 128))
++#error "GGML_HIP_MMQ_Y must be one of: 32, 64, 96, 128"
++#endif
++    return GGML_HIP_MMQ_Y;
++#elif defined(RDNA1)
+     return 64;
+ #else
+     return 128;
+-#endif // defined RDNA1
++#endif // defined(GGML_HIP_MMQ_Y)
+ #else
+ #if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+     return 128;
+@@ -251,6 +279,15 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
+ #define MMQ_TILE_Y_K     (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)
+ #define MMQ_TILE_Y_FP4_K MMQ_TILE_Y_K
+ 
++// LDS stride for Y-tile - PADDING ANALYSIS RESULTS:
++// Original stride 40: 40 mod 32 = 8 → 4-way bank conflicts (9.3% LDS stalls)
++// Tested: Padded stride 41 with dst_idx = l + l/40 mapping
++// Result: -3.5% slower (1180 vs 1223 t/s) even with proper shared mem allocation
++// Root cause: Division overhead in store loop outweighs bank conflict reduction
++// The bank conflicts occur during vec_dot reads, but the overhead is in stores
++// Conclusion: Keep original stride - bank conflicts are cheaper than index math
++#define MMQ_TILE_Y_K_LDS MMQ_TILE_Y_K
++
+ static int mmq_get_granularity_host(const int mmq_x, const int cc) {
+     if (amd_mfma_available(cc) || amd_wmma_available(cc)) {
+         return mmq_x >= 128 ? 32 : 16;
+@@ -384,15 +421,20 @@ static __device__ __forceinline__ void vec_dot_q4_0_q8_1_dp4a(
+ 
+                 int u[2*VDR_Q4_0_Q8_1_MMQ];
+ 
++#if defined(GGML_USE_HIP)
++                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
++                gfx906_load_q4_0_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_0, u);
++#else
+ #pragma unroll
+                 for (int l = 0; l < VDR_Q4_0_Q8_1_MMQ; ++l) {
+-                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
+-                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_0)];
++                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
++                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_0)];
+                 }
++#endif
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_0_q8_1_impl<VDR_Q4_0_Q8_1_MMQ>
+                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_0], u,
+-                     x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + k0/(QR4_0*QI4_0)], y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                     x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + k0/(QR4_0*QI4_0)], y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -487,15 +529,20 @@ static __device__ __forceinline__ void vec_dot_q4_1_q8_1_dp4a(
+ 
+                 int u[2*VDR_Q4_1_Q8_1_MMQ];
+ 
++#if defined(GGML_USE_HIP)
++                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
++                gfx906_load_q4_1_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_1, u);
++#else
+ #pragma unroll
+                 for (int l = 0; l < VDR_Q4_1_Q8_1_MMQ; ++l) {
+-                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
+-                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_1)];
++                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
++                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_1)];
+                 }
++#endif
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_1_q8_1_impl<VDR_Q4_1_Q8_1_MMQ>
+                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_1], u,
+-                     x_dm[i*(MMQ_TILE_NE_K/QI4_1) + i/QI4_1 + k0/(QR4_1*QI4_1)], y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                     x_dm[i*(MMQ_TILE_NE_K/QI4_1) + i/QI4_1 + k0/(QR4_1*QI4_1)], y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -676,24 +723,46 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+     const int kbx  = txi / QI8_0;
+     const int kqsx = txi % QI8_0;
+ 
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    // GFX906: Software pipelining using macros from gfx906-mmq.cuh
++    constexpr int loop_iters = mmq_y / (nrows * nwarps);
++    constexpr int cache_size = loop_iters > 16 ? 16 : loop_iters;
++    int qs0_cache[cache_size];
++    int qs1_cache[cache_size];
++    int i_slot_cache[cache_size];
++
++    // Load all data into registers (async)
++    GFX906_LOAD_TILES_Q8_0_ASYNC(cache_size, nrows, nwarps, threads_per_row, need_check,
++        x, kbx0, stride, i_max, txi, kbx, kqsx, qs0_cache, qs1_cache, i_slot_cache);
++
++    // Store all to LDS
++#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
++    GFX906_STORE_TILES_Q8_0_LDS_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
++#else
++    GFX906_STORE_TILES_Q8_0_LDS_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
++#endif
++#else
+ #pragma unroll
+     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
++        // GFX906 optimization: Avoid LDS write conflicts in need_check path.
++        // Original code clamped i to i_max, causing all out-of-bounds threads to
++        // write to the SAME location (tile[i_max*...]) - serializing LDS writes.
++        // Fix: Each thread writes to its ORIGINAL slot; out-of-bounds write zeros.
++        const int i_slot = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
++        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
++        const bool oob = need_check && (i_slot > i_max);
+ 
+-        if (need_check) {
+-            i = min(i, i_max);
+-        }
+-
+-        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbx;
++        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbx;
+ 
+ #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
+-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
++        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
++        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+ #else
+-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
+-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
++        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = oob ? 0 : get_int_b2(bxi[0].qs,                   kqsx);
++        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+ #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+     }
++#endif
+ 
+     constexpr int blocks_per_tile_x_row = 2*MMQ_TILE_NE_K / QI8_0;
+     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+@@ -701,18 +770,17 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+ 
+ #pragma unroll
+     for (int i0 = 0; i0 < mmq_y; i0 += nwarps * rows_per_warp) {
+-        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
++        // Same optimization for scale loading
++        const int i_slot = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
++        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
++        const bool oob = need_check && (i_slot > i_max);
+ 
+-        if (need_check) {
+-            i = min(i, i_max);
+-        }
+-
+-        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbxd;
++        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbxd;
+ 
+ #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+-        x_df[i*MMQ_MMA_TILE_X_K_Q8_0                 + kbxd] = bxi->d;
++        x_df[i_slot*MMQ_MMA_TILE_X_K_Q8_0                 + kbxd] = oob ? 0.0f : (float)bxi->d;
+ #else
+-        x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + kbxd] = bxi->d;
++        x_df[i_slot*(2*MMQ_TILE_NE_K/QI8_0) + i_slot/(QI8_0/2) + kbxd] = oob ? 0.0f : (float)bxi->d;
+ #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+     }
+ }
+@@ -737,6 +805,41 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+     const int kbx  = txi / QI_MXFP4;
+     const int kqsx = txi % QI_MXFP4;
+ 
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    // GFX906: Software pipelining - load all data first, then dequant all
++    // Maximizes memory-level parallelism before compute
++    constexpr int loop_iters = mmq_y / (nrows * nwarps);
++    int aux_q4_cache[loop_iters > 16 ? 16 : loop_iters];
++    int i_cache[loop_iters > 16 ? 16 : loop_iters];
++
++    // Phase 1: Issue all loads
++    #pragma unroll
++    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
++        const int i0 = iter * nrows * nwarps;
++        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
++        if (need_check) {
++            i = min(i, i_max);
++        }
++        const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
++        aux_q4_cache[iter] = get_int_b1(bxi->qs, kqsx);
++        i_cache[iter] = i;
++    }
++
++    // Phase 2: Dequant and store
++    const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
++    #pragma unroll
++    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
++        const int2 v = get_int_from_mxfp4_table(aux_q4_cache[iter]);
++        const int i = i_cache[iter];
++#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
++        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0]        = v.x;
++        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + QI_MXFP4] = v.y;
++#else
++        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0]        = v.x;
++        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
++#endif
++    }
++#else
+ #pragma unroll
+     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+@@ -748,7 +851,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+         const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
+ 
+         const int aux_q4 = get_int_b1(bxi->qs, kqsx);
+-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
++        const int2 v = get_int_from_mxfp4_table(aux_q4);
+         const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
+ 
+ #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+@@ -759,6 +862,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
+         x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
+ #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)  || defined(AMD_WMMA_AVAILABLE)
+     }
++#endif
+ 
+     constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI_MXFP4;
+     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+@@ -851,8 +955,8 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_dp4a(
+                 const int i = i0 + threadIdx.x;
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q8_0_q8_1_impl<float, VDR_Q8_0_Q8_1_MMQ>
+-                    (&x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k0 % MMQ_TILE_NE_K],
+-                     x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + k0/QI8_0], y_df[j*MMQ_TILE_Y_K + (k0/QI8_1) % (MMQ_TILE_NE_K/QI8_1)]);
++                    (&x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k0 % MMQ_TILE_NE_K],
++                     x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + k0/QI8_0], y_df[j*MMQ_TILE_Y_K_LDS + (k0/QI8_1) % (MMQ_TILE_NE_K/QI8_1)]);
+             }
+         }
+     }
+@@ -2118,8 +2222,8 @@ static __device__ __forceinline__ void vec_dot_q4_K_q8_1_dp4a(
+                 const uint8_t * sc = (const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/32] + 2*(k01/16);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_K_q8_1_impl_mmq(
+-                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
+-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(MMQ_TILE_NE_K + 1) + k0/2], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
++                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2275,8 +2379,8 @@ static __device__ __forceinline__ void vec_dot_q5_K_q8_1_dp4a(
+                 const uint8_t * sc = ((const uint8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k00/32]) + 2*(k01/16);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q5_K_q8_1_impl_mmq(
+-                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc, sc+8,
+-                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(QR5_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc, sc+8,
++                    x_dm[i], &y_ds[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2396,8 +2500,8 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_dp4a(
+                 const int8_t * sc = ((const int8_t *) &x_sc[i * (MMQ_TILE_NE_K/8) + i/8 + k0/16]);
+ 
+                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q6_K_q8_1_impl_mmq(
+-                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K + k01], sc,
+-                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K + k01/QI8_1]);
++                    &x_qs[i*(QR6_K*MMQ_TILE_NE_K + 1) + k0], &y_qs[j*MMQ_TILE_Y_K_LDS + k01], sc,
++                    x_df[i*(MMQ_TILE_NE_K/QI6_K) + i/QI6_K], &y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1]);
+             }
+         }
+     }
+@@ -2439,10 +2543,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+ #pragma unroll
+         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+             tile_B B[1];
+-            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
++            load_generic(((tile_load *) B)[0], y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
+ 
+             const int j = j0 + tile_C::get_j(0);
+-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1] / 2;
++            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1] / 2;
+ 
+ #pragma unroll
+             for (int n = 0; n < ntx; ++n) {
+@@ -2468,7 +2572,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+     constexpr int rows_per_warp = granularity;
+     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+ 
+-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
++    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
+ 
+     const int   * x_qs = (const int   *) x;
+     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
+@@ -2490,10 +2594,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+ #pragma unroll
+         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+             tile_B B;
+-            load_generic(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
++            load_generic(B, y_qs + j0*MMQ_TILE_Y_K_LDS + k01, MMQ_TILE_Y_K_LDS);
+ 
+             const int j = j0 + tile_C::get_j(0);
+-            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
++            const float dB = y_df[j*MMQ_TILE_Y_K_LDS + k01/QI8_1];
+ 
+ #pragma unroll
+             for (int n = 0; n < ntx; ++n) {
+@@ -2519,7 +2623,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
+     constexpr int rows_per_warp = 2 * granularity;
+     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+ 
+-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
++    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K_LDS);
+ 
+     const int   * x_qs = (const int   *) x;
+     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
+@@ -3375,7 +3479,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
+ 
+     extern __shared__ int data_mul_mat_q[];
+     int * tile_y = data_mul_mat_q + mmq_x;
+-    int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
++    int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K_LDS, nwarps*warp_size);
+ 
+ #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+     constexpr vec_dot_mmq_t    vec_dot    = mmq_type_traits<mmq_x, mmq_y, need_check, type>::vec_dot_mma;
+@@ -3404,15 +3508,22 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
+         {
+             const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
+ #pragma unroll
+-            for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+-
++            for (int l0 = 0; l0 < mmq_x*MMQ_TILE_Y_K_LDS; l0 += nwarps*warp_size) {
++                const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                 tile_y[l] = by0[l];
+             }
+         }
+ 
+         __syncthreads();
+ 
++// GFX906 PREFETCH: Issue AFTER barrier1, BEFORE vec_dot1
++// Maximum overlap: vec_dot1 + barrier2 + Y_tile2_load + barrier3 + vec_dot2 + barrier4 + X_tile_loads
++// Data used at Y_tile1_load in next iteration (~600+ instructions of overlap)
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++        int prefetch_keep_alive = gfx906_prefetch_y_tile_v4<mmq_x, MMQ_TILE_Y_K, nwarps, warp_size>(
++            y, ncols_y, kb0, kb0_stop, qk, blocks_per_iter);
++#endif
++
+         vec_dot(tile_x, tile_y, sum, 0);
+ 
+         __syncthreads();
+@@ -3420,9 +3531,8 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
+         {
+             const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
+ #pragma unroll
+-            for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+-                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+-
++            for (int l0 = 0; l0 < mmq_x*MMQ_TILE_Y_K_LDS; l0 += nwarps*warp_size) {
++                const int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                 tile_y[l] = by0[l];
+             }
+         }
+@@ -3431,6 +3541,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
+ 
+         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+ 
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++        gfx906_prefetch_consume(prefetch_keep_alive);
++#endif
++
+         __syncthreads();
+     }
+ 
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index d671551c..1b5e3741 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -3,6 +3,14 @@
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
+ 
++// GFX906-specific warp-cooperative MMVQ kernels (compile with -DGGML_HIP_GFX906)
++#if defined(GGML_HIP_GFX906)
++#include "gfx906/gfx906-mmvq-q4_0.cuh"
++#include "gfx906/gfx906-mmvq-q4_1.cuh"
++#include "gfx906/gfx906-mmvq-q5_k.cuh"
++#include "gfx906/gfx906-mmvq-q8_0.cuh"
++#endif
++
+ #include <cstdint>
+ 
+ typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
+@@ -477,12 +485,51 @@ static void mul_mat_vec_q_switch_type(
+         cudaStream_t stream) {
+     switch (type_x) {
+         case GGML_TYPE_Q4_0:
++#if defined(GGML_HIP_GFX906)
++            {
++                const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++
++                if (ncols_dst == 1 && !has_fusion && ncols_x <= 1024) {
++                    const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
++                    const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
++                    const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
++
++                    gfx906_launch_mul_mat_vec_q4_0_warp_coop(
++                        vx, vy, ids, dst,
++                        ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
++                        channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
++                        sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
++                        nrows_x, nchannels_dst, nsamples_dst, stream);
++                    break;
++                }
++            }
++#endif
+             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_0>
+                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, stream);
+             break;
+         case GGML_TYPE_Q4_1:
++    #if defined(GGML_HIP_GFX906)
++            {
++                const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++
++                // Use warp-coop for small matrices only (MoE experts, <= 1024 cols)
++                if (ncols_dst == 1 && !has_fusion && ncols_x <= 1024) {
++                    const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
++                    const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
++                    const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
++
++                    gfx906_launch_mul_mat_vec_q4_1_warp_coop(
++                        vx, vy, ids, dst,
++                        ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
++                        channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
++                        sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
++                        nrows_x, nchannels_dst, nsamples_dst, stream);
++                    break;
++                }
++            }
++#endif
+             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_1>
+                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+@@ -501,6 +548,25 @@ static void mul_mat_vec_q_switch_type(
+                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, stream);
+             break;
+         case GGML_TYPE_Q8_0:
++#if defined(GGML_HIP_GFX906)
++            {
++                const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++
++                if (ncols_dst == 1 && !has_fusion && ncols_x <= 1024) {
++                    const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
++                    const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
++                    const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
++
++                    gfx906_launch_mul_mat_vec_q8_0_warp_coop(
++                        vx, vy, ids, dst,
++                        ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
++                        channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
++                        sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
++                        nrows_x, nchannels_dst, nsamples_dst, stream);
++                    break;
++                }
++            }
++#endif
+             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q8_0>
+                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+@@ -531,6 +597,26 @@ static void mul_mat_vec_q_switch_type(
+                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, stream);
+             break;
+         case GGML_TYPE_Q5_K:
++            #if defined(GGML_HIP_GFX906)
++            {
++                const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++
++                // Use warp-coop for small matrices only (MoE experts, <= 1024 cols)
++                if (ncols_dst == 1 && !has_fusion && ncols_x <= 1024) {
++                    const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
++                    const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0) : init_fastdiv_values(nchannels_dst / nchannels_x);
++                    const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst / nsamples_x);
++
++                    gfx906_launch_mul_mat_vec_q5_K_warp_coop(
++                        vx, vy, ids, dst,
++                        ncols_x, nchannels_y_fd, stride_row_x, stride_col_dst,
++                        channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
++                        sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
++                        nrows_x, nchannels_dst, nsamples_dst, stream);
++                    break;
++                }
++            }
++            #endif
+             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q5_K>
+                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+diff --git a/ggml/src/ggml-cuda/vecdotq.cuh b/ggml/src/ggml-cuda/vecdotq.cuh
+index 6baab117..808419ff 100644
+--- a/ggml/src/ggml-cuda/vecdotq.cuh
++++ b/ggml/src/ggml-cuda/vecdotq.cuh
+@@ -4,6 +4,11 @@
+ 
+ #include <cstdint>
+ 
++// GFX906 optimizations
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    #include "gfx906/gfx906-vecdotq.cuh"
++#endif
++
+ static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
+     const uint8_t * x8 = (const uint8_t *) x;
+ 
+@@ -15,8 +20,10 @@ static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32
+     return x32;
+ }
+ 
++// GFX906: get_int_b1_fast is defined in gfx906/gfx906-vecdotq.cuh as gfx906_get_int_b1_fast
++
+ static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32) {
+-    const uint16_t * x16 = (const uint16_t *) x; // assume at least 2 byte alignment
++    const uint16_t * x16 = (const uint16_t *) x;
+ 
+     int x32  = x16[2*i32 + 0] <<  0;
+     x32     |= x16[2*i32 + 1] << 16;
+@@ -24,45 +31,59 @@ static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32
+     return x32;
+ }
+ 
++// GFX906: get_int_b2_fast is defined in gfx906/gfx906-vecdotq.cuh as gfx906_get_int_b2_fast
++
+ static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32) {
+-    return ((const int *) x)[i32]; // assume at least 4 byte alignment
++    return ((const int *) x)[i32];
++}
++
++static __device__ __forceinline__ int2 get_int_from_mxfp4_table(const uint32_t q4) {
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    // GFX906: Use optimized lookup from gfx906-vecdotq.cuh
++    return gfx906_get_int_from_mxfp4_table(q4);
++#else
++    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
++    const int8_t * q0_8   = (const int8_t *) &q0_32;
++    const char4    val0_8 = make_char4(
++        kvalues_mxfp4[q0_8[0]], kvalues_mxfp4[q0_8[1]], kvalues_mxfp4[q0_8[2]], kvalues_mxfp4[q0_8[3]]);
++
++    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
++    const int8_t * q1_8   = (const int8_t *) &q1_32;
++    const char4    val1_8 = make_char4(
++        kvalues_mxfp4[q1_8[0]], kvalues_mxfp4[q1_8[1]], kvalues_mxfp4[q1_8[2]], kvalues_mxfp4[q1_8[3]]);
++
++    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
++#endif
+ }
+ 
+-// q4 contains 8 indices with 4 bit each.
+-// This function selects those bytes from table that are at those indices and returns them as int2.
+-// The first int contains the bytes with even indices in q4, the second int contains the bytes with odd indices in q4.
+ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {
+ #if defined(GGML_USE_HIP)
+-    // Load the 16-byte table into four 32-bit unsigned integers.
+     const uint32_t *values = (const uint32_t *)table;
+ 
+     const uint32_t q_even = q4;
+     const uint32_t q_odd  = (q4 >> 4);
+ 
+-    // Perform lookups in the lower half of the table (indices 0-7).
+-    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], q_even & 0x07070707);
+-    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], q_odd & 0x07070707);
++    const uint32_t sel_even = q_even & 0x07070707;
++    const uint32_t sel_odd  = q_odd & 0x07070707;
++
++    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], sel_even);
++    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], sel_odd);
++    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], sel_even);
++    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], sel_odd);
+ 
+-    // Perform lookups in the upper half of the table (indices 8-15).
+-    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], q_even & 0x07070707);
+-    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], q_odd & 0x07070707);
++    uint32_t b3e = (q_even >> 3) & 0x01010101;
++    uint32_t me = b3e; me |= me << 1; me |= me << 2; me |= me << 4;
+ 
+-    // Select between the low and high results based on the MSB of each index nibble.
+-    uint32_t mask_even = 0x03020100 | ((q_even & 0x08080808) >> 1);
+-    uint32_t res_x = __builtin_amdgcn_perm(v_even_high, v_even_low, mask_even);
+-    uint32_t mask_odd = 0x03020100 | ((q_odd & 0x08080808) >> 1);
+-    uint32_t res_y = __builtin_amdgcn_perm(v_odd_high, v_odd_low, mask_odd);
++    uint32_t b3o = (q_odd >> 3) & 0x01010101;
++    uint32_t mo = b3o; mo |= mo << 1; mo |= mo << 2; mo |= mo << 4;
++
++    uint32_t res_x = (v_even_high & me) | (v_even_low & ~me);
++    uint32_t res_y = (v_odd_high & mo) | (v_odd_low & ~mo);
+ 
+     return make_int2(res_x, res_y);
+ #elif !defined(GGML_USE_MUSA)
+-    // CUDA does not have an instruction for selecting bytes with 4 bit indices.
+-    // However, __byte_perm is an instruction that selects bytes with 3 bit indices that can be used instead.
+     const uint32_t * table32 = (const uint32_t *) table;
+ 
+-    // __byte_perm selects bytes based on the lower 16 bits in its third argument.
+-    // Therefore, do 2 iterations over the 32 bits in q4 with 0 and 16 shift.
+-    // To handle the fourth bit, first call _byte_perm both for the low and the high 64 bit of table, using the low 3 bits.
+-    // Then, call __byte_perm again to select from the low and high bytes based on the fourth bit.
+     uint32_t tmp[2];
+     const uint32_t low_high_selection_indices = (0x32103210 | ((q4 & 0x88888888) >> 1));
+ #pragma unroll
+@@ -74,9 +95,6 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
+         tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
+     }
+ 
+-    // tmp contains the bytes from tyble in the same order as the 4 bit indices in q4.
+-    // However, for the result we need ints with all even/odd 4 bit indices in q4.
+-    // Therefore, 2 more calls to __byte_perm to put the bytes in the correct order.
+     return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
+ #else
+     // Generic implementation.
+@@ -297,17 +315,23 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
+ 
+     const block_mxfp4 * bq4 = (const block_mxfp4 *) vbq + kbx;
+ 
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++    // GFX906: Use software pipelined version from gfx906-vecdotq.cuh
++    int sumi = 0;
++    GFX906_VEC_DOT_MXFP4_Q8_1(bq4, bq8_1, iqs, sumi);
++#else
+     const int * q8 = (const int *) bq8_1->qs + iqs;
+ 
+     int sumi = 0;
+ #pragma unroll
+     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
+         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
++        const int2 v = get_int_from_mxfp4_table(aux_q4);
+ 
+         sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+         sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+     }
++#endif
+ 
+     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
+     return d * sumi;
+@@ -715,7 +739,11 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
+ 
+ #pragma unroll
+     for (int i = 0; i < VDR_Q8_0_Q8_1_MMVQ; ++i) {
++#if defined(GGML_USE_HIP) && defined(__gfx906__)
++        v[i] = gfx906_get_int_b2_fast(bq8_0->qs, iqs + i);
++#else
+         v[i] = get_int_b2(bq8_0->qs, iqs + i);
++#endif
+         u[i] = get_int_b4(bq8_1->qs, iqs + i);
+     }
+ 
