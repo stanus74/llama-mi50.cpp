@@ -15,6 +15,9 @@
 - Verifiziere, dass die Dateien nur gfx906-spezifische Implementierungen enthalten.
 - Pruefe Abhaengigkeiten zu allgemeinen CUDA/HIP Headern und passe Includes falls noetig an.
 - Dokumentiere Kernel-Gruppen nach Zweck (MMQ, MMVQ, FATTN, VEC/DOT, Fused Ops).
+- Validierung: DPP/SDWA Legalitaet je Kernelgruppe pruefen (keine ungueltigen Permutationen).
+- Validierung: LDS-Layout/Stride Matrix testen (z.B. 32/33/40/41), Bankkonflikte minimieren.
+- Validierung: Alignment fuer vectorized Loads (int4/float4) dokumentieren und pruefen.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - GFX906 Q8 Flash-Attention Kernels hinzufuegen: [ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cu](ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cu), [ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cuh](ggml/src/ggml-cuda/gfx906/attention/fattn-q8.cuh).
 - GFX906 Attention Tile-Instanzen anlegen: [ggml/src/ggml-cuda/gfx906/attention/instances/](ggml/src/ggml-cuda/gfx906/attention/instances/).
@@ -34,6 +37,8 @@
 - Pruefe die Dispatch-Logik in ggml/src/ggml-cuda/mmvq.cu auf gfx906-Pfade.
 - Stelle sicher, dass Fallback-Pfade fuer Nicht-gfx906 korrekt bleiben.
 - Verifiziere Guard-Makros fuer HIP und gfx906.
+- Validierung: Guard-Makros gegen ROCm/HIP Versionen pruefen (keine stillen Fallbacks).
+- Profiling-Gate: Pfadwahl protokollieren (Log/Trace), damit gfx906-Pfad sicher aktiv ist.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - GFX906 Dispatch und Kernel-Auswahl in [ggml/src/ggml-cuda/mmvq.cu](ggml/src/ggml-cuda/mmvq.cu) integrieren.
 - Backend-Integration fuer GFX906 in [ggml/src/ggml-cuda/ggml-cuda.cu](ggml/src/ggml-cuda/ggml-cuda.cu) nachvollziehen.
@@ -46,6 +51,8 @@
 - Vergleiche Aenderungen in ggml/src/ggml-cuda/fattn.cu.
 - Ordne GFX906-Q8 Attention-Kernel unter ggml/src/ggml-cuda/gfx906/attention ein.
 - Notiere Aenderungen an Tile-Groessen und Split-K Entscheidungen.
+- Validierung: DPP/Shuffle Pfade mit Wave64 Divergenz testen (EXEC Mask Szenarien).
+- Profiling-Gate: Tile-Varianten vs. LDS/VMEM/Occupancy messen und dokumentieren.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - Split-K Logik fuer PP vs TG anpassen in [ggml/src/ggml-cuda/fattn.cu](ggml/src/ggml-cuda/fattn.cu).
 - Shuffles auf DPP/Unified Shuffle umstellen in [ggml/src/ggml-cuda/fattn-common.cuh](ggml/src/ggml-cuda/fattn-common.cuh).
@@ -59,6 +66,10 @@
 - Pruefe Aenderungen in ggml/src/ggml-cuda/vecdotq.cuh.
 - Ordne neue Quantize-Header unter ggml/src/ggml-cuda/gfx906/quantize ein.
 - Notiere Optimierungen (Software-Pipelining, Vektorisierung, LDS-Strategien).
+- Validierung: Alignment und Vector-Load Pfade (int4/float4) pro Quant-Typ pruefen.
+- Validierung: LDS-Layout/Stride Matrix testen (Bankkonflikte bei Q8/MXFP4).
+- Profiling-Gate: Prefetch-Tiefe vs. VGPR-Druck/Occupancy evaluieren.
+- Microbenchmarks: VecDot/MMQ/MMVQ separat messen, um Regressions frueh zu erkennen.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - Q8 Pipeline Anpassungen und Prefetch in [ggml/src/ggml-cuda/mmq.cuh](ggml/src/ggml-cuda/mmq.cuh).
 - VecDot und quantisierte Dot Pfade in [ggml/src/ggml-cuda/vecdotq.cuh](ggml/src/ggml-cuda/vecdotq.cuh).
@@ -72,6 +83,8 @@
 - Pruefe Fixes in ggml/src/ggml-cuda/mmid.cu.
 - Verifiziere Bedingungen fuer Fallback-Pfade bei grossen Expert-Zahlen.
 - Notiere Auswirkungen auf Stabilitaet fuer MoE Modelle.
+- Validierung: Divergenz/EXEC Mask Tests bei grossen Expert-Zahlen definieren.
+- Validierung: Sub-Warp Shuffle Korrektheit in Wave64 mit teilaktiven Lanes pruefen.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - Sub-Warp Shuffle Fix und Fallback-Regeln in [ggml/src/ggml-cuda/mmq.cu](ggml/src/ggml-cuda/mmq.cu).
 - MoE Stabilitaetsfixes in [ggml/src/ggml-cuda/mmid.cu](ggml/src/ggml-cuda/mmid.cu).
@@ -85,6 +98,7 @@
 - ggml/src/ggml-cuda/common.cuh: Warp-Reduktionen und Shuffle Dispatch (DPP Pfad).
 - ggml/src/ggml-cuda/gfx906/gfx906-common.cuh: DPP Ops und Warp Utils fuer gfx906.
 - ggml/src/ggml-cuda/gfx906/gfx906-config.h: Schalter und Konstanten fuer gfx906.
+- Validierung: DPP/SDWA Legalitaet und Permutation-Limits dokumentieren.
 - Aenderungen umsetzen (Quelle: diff-b7924/all_gfx906_changes.diff, diff-b7924/cuda_gfx906_changes.diff):
 - Unified Shuffle XOR und DPP-Reduktionen in [ggml/src/ggml-cuda/common.cuh](ggml/src/ggml-cuda/common.cuh).
 - GFX906 DPP Utils und Konfigurationen anlegen in [ggml/src/ggml-cuda/gfx906/gfx906-common.cuh](ggml/src/ggml-cuda/gfx906/gfx906-common.cuh) und [ggml/src/ggml-cuda/gfx906/gfx906-config.h](ggml/src/ggml-cuda/gfx906/gfx906-config.h).
@@ -104,3 +118,8 @@
 - SCRIPT_llama_bench2.sh: Alternative Benchmark-Konfiguration.
 - SCRIPT_overclock_upp_MI50.sh: Overclocking Workflow (optional).
 - scripts/bench-models.sh: Sammel-Benchmarks und Model-Loop.
+
+## Querschnitt - Validierung und Profiling
+- Profiling-Gate pro Kategorie: Occupancy, VGPR, LDS, VMEM/SMEM, Wavefronts/SE messen.
+- Microbenchmarks pro Kernelgruppe (MMQ, MMVQ, FATTN, VecDot) als Regressionstest.
+- Log/Trace: klare Anzeige, ob gfx906-Pfad aktiv ist (Build und Runtime).

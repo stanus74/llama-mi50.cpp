@@ -468,11 +468,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 #ifdef GGML_USE_HIP
     if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
-        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
-                                            (K->ne[0] != 40) &&
-                                            (K->ne[0] != 80) &&
-                                            (K->ne[0] != 112) &&
-                                            (K->ne[0] != 576);
+        const bool q8_head_size_supported = GFX906_Q8_SUPPORTS_HEAD_DIM(K->ne[0]);
 
         if (q8_head_size_supported) {
             return BEST_FATTN_KERNEL_TILE_Q8;

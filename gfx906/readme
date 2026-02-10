@@ -1,0 +1,188 @@
+# llama.cpp GFX906 (MI50) Optimization Lab
+
+Kernel analysis and incremental optimization for AMD MI50 (GFX906/Vega 20) GPUs. The [iacopPBK/llama.cpp-gfx906](https://github.com/iacopPBK/llama.cpp-gfx906) fork is **significantly more advanced** than initially assessed - most major optimizations are already implemented.
+
+## Project Reality Check
+
+**Key Finding:** The base fork is already highly optimized with:
+- ✅ World-class DPP-based warp reductions (37% instruction reduction)
+- ✅ MXFP4 support already implemented (dequantization confirmed)
+- ✅ Vectorized memory access for Q4_0/Q4_1
+- ✅ GCN-tuned flash attention
+- ✅ AMD intrinsics (sdot4, dot2_f16) extensively used
+
+**Remaining opportunities are incremental (5-20%), not transformational.**
+
+**Critical Next Step: PROFILE actual workloads before assuming bottlenecks.**
+
+## Quick Start
+
+```bash
+# 1. Review the optimization summary
+cat docs/GFX906_OPTIMIZATION_SUMMARY.md
+
+# 2. Set up remote MI50 server
+ssh -p 2222 rocmuser@192.168.1.28
+sudo usermod -a -G video,render rocmuser  # Fix GPU access
+exit
+
+# 3. Build and test
+cd kernel-bench
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_HIP_ARCHITECTURES=gfx906
+make -j$(nproc)
+./test_warp_reduce
+
+# 4. Deploy from local machine
+./scripts/build_and_test.sh --sync --test
+```
+
+## Repository Structure
+
+```
+llama-labs/
+├── docs/
+│   ├── GFX906_OPTIMIZATION_SUMMARY.md    ← START HERE
+│   ├── Vega_7nm_Shader_ISA_26November2019.pdf
+│   ├── OCP_Microscaling Formats (MX) v1.0 Spec_Final.pdf
+│   ├── spec2-nn-gfx906.yaml
+│   └── miopen-gfx906-kernels/            ← Production kernel assembly
+├── kernel-bench/                          ← Isolated test framework
+│   ├── include/bench_harness.h
+│   ├── kernels/*.hip
+│   ├── tests/*.cpp
+│   └── CMakeLists.txt
+├── llama.cpp-gfx906/                      ← Base optimized fork
+└── lm_notes/                              ← Project notes
+```
+
+## What's Already Optimized
+
+### Confirmed in llama.cpp-gfx906 (After Deep Analysis)
+- ✅ **DPP-based warp reductions** - World-class, fused v_add_f32_dpp/v_max_f32_dpp
+- ✅ **MXFP4 quantization** - Type defined, dequantization implemented
+- ✅ **Vectorized Q4_0/Q4_1 loads** - int4 vectorization complete
+- ✅ **Flash attention** - GCN-tuned thread counts (nthreads_KQ_q=2, nthreads_V_q=4)
+- ✅ **AMD intrinsics** - __builtin_amdgcn_sdot4, v_dot2_f32_f16 in use
+- ✅ **Proper DPP barriers** - s_nop 4 (first), s_nop 1 (subsequent)
+- **Result:** 3-31% speedup vs vanilla llama.cpp
+
+### Actual Gaps Found (After Verification)
+
+#### 1. MXFP4 GPU Quantization (VERIFY FIRST)
+- Dequantization: ✅ Implemented
+- Quantization (FP32→MXFP4): ❓ Location unknown (CPU or GPU?)
+- **Action:** Verify, then implement GPU version if needed
+- **Impact:** 10-20x IF currently CPU-bound
+
+#### 2. v_dot8_i32_i4 for Q4 (Profile First)
+- Currently using sdot4 (4-way INT8)
+- Opportunity: Native 8-way INT4 dot product
+- **Challenge:** Data repacking, only helps if compute-bound
+- **Impact:** 2x instructions IF compute-bound (verify with profiling)
+
+#### 3. Memory Patterns from MIOpen
+- Buffer instructions vs flat (5-10% bandwidth)
+- LDS bank conflict elimination (10-15% in heavy LDS kernels)
+- **Impact:** Incremental, requires profiling to prioritize
+
+## Testing Philosophy
+
+**Every optimization must be bit-exact correct:**
+
+```cpp
+// Non-negotiable requirement
+assert(baseline_result == optimized_result);
+```
+
+Each test includes:
+1. CPU reference implementation
+2. Baseline GPU kernel (no optimizations)
+3. Optimized GPU kernel
+4. Strict correctness verification
+5. Performance measurement with rocprof
+
+## GFX906 Architecture Highlights
+
+```
+Compute Units:     60
+Wavefront Size:    64 threads (not 32!)
+VGPRs/SIMD:        256 (shared by waves)
+LDS/CU:            64 KB
+Memory Bandwidth:  1024 GB/s peak
+FP32 Performance:  13.3 TFLOPS peak
+```
+
+### Critical Instructions
+
+**Fused DPP+ALU (already used):**
+```asm
+v_add_f32_dpp v0, v1, v1 quad_perm:[1,0,3,2]  ; XOR 1 fused
+v_max_f32_dpp v0, v1, v1 row_ror:8            ; XOR 8 fused
+```
+
+**Dot Products (PRIORITY TO ADD):**
+```asm
+v_dot8_i32_i4 vdst, src0:i4x8, src1:i4x8, src2:i32  ; 8×4-bit → int32
+v_dot4_i32_i8 vdst, src0:i8x4, src1:i8x4, src2:i32  ; 4×8-bit → int32
+v_dot2_f32_f16 vdst, src0:f16x2, src1:f16x2, src2:f32  ; 2×FP16 → FP32
+```
+
+**FMAC (in-place accumulate):**
+```asm
+v_fmac_f32 vdst, src0, vsrc1  ; vdst = vdst + (src0 * vsrc1)
+```
+
+## Resources
+
+- **Optimization Summary:** `docs/GFX906_OPTIMIZATION_SUMMARY.md` - Read this first
+- **ISA Manual:** `docs/Vega_7nm_Shader_ISA_26November2019.pdf`
+- **MX Spec:** `docs/OCP_Microscaling Formats (MX) v1.0 Spec_Final.pdf`
+- **MIOpen Kernels:** `docs/miopen-gfx906-kernels/*.s` - Production assembly
+- **Base Fork:** [iacopPBK/llama.cpp-gfx906](https://github.com/iacopPBK/llama.cpp-gfx906)
+
+## Test Environment
+
+- **Host:** 192.168.1.28:2222
+- **User:** rocmuser / rocm123
+- **GPU:** AMD MI50 (GFX906)
+- **ROCm:** 6.x
+
+## Realistic Performance Expectations
+
+**After gap analysis, expectations are REVISED:**
+
+**Microbenchmark (best case):**
+- MXFP4 GPU quantization: 10-20x IF currently CPU-bound
+- v_dot8_i32_i4: 2x instructions IF compute-bound
+- LDS banking: 10-15% in affected kernels
+- Buffer instructions: 5-10% memory bandwidth
+
+**End-to-End (realistic):**
+- **Conservative: 5-10%** (incremental improvements)
+- **Optimistic: 15-20%** (if optimizations stack)
+- **Base fork already achieves 3-31%** (depending on workload)
+
+**Critical: Profile first, then set targets based on actual bottlenecks.**
+
+## Contributing
+
+All optimizations require:
+1. **Profile first** - Identify actual bottleneck (memory vs compute)
+2. Implement baseline version
+3. Implement optimized version  
+4. Verify: `baseline == optimized` (bit-exact)
+5. Benchmark with rocprof (before/after comparison)
+6. Measure actual improvement (not assumed)
+7. Only proceed if >5% measurable gain
+
+## Key Documents
+
+1. **README.md** (this file) - Project overview
+2. **docs/IMPLEMENTATION_GAP_ANALYSIS.md** - What's done vs what remains
+3. **docs/GFX906_OPTIMIZATION_SUMMARY.md** - Architecture analysis
+4. **lm_notes/20241106_project_init.md** - Detailed findings
+
+## License
+
+Same as llama.cpp (MIT)
